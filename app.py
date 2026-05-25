@@ -668,7 +668,7 @@ def render_sidebar() -> tuple[date, date, date]:
             key="sidebar_as_of",
         )
         # 수집 시작일: 표준화 5년 윈도우 + 여유 1년
-        start_d = date(end_d.year - 6, 1, 1)
+        start_d = date(end_d.year - 18, 1, 1)
         st.caption(f"데이터 수집 시작: {start_d.isoformat()}")
         st.caption(f"데이터 수집 종료: {end_d.isoformat()}")
 
