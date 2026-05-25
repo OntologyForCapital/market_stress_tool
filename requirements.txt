@@ -1,0 +1,39 @@
+# ===========================================
+# Market Stress Tool - Python Dependencies
+# Python 3.11 권장 (Streamlit Cloud 기본 호환 버전).
+# 로컬은 3.10도 가능하나, 배포는 runtime.txt의 3.11을 우선 적용.
+# ===========================================
+
+# --- 데이터 처리 핵심 ---
+pandas==2.2.2
+numpy==1.26.4
+pyarrow==16.1.0          # parquet 캐시 저장용
+
+# --- 데이터 수집 ---
+# 주의: pykrx가 pkg_resources를 import하므로 setuptools<81 필요
+setuptools<81
+fredapi==0.5.2           # FRED 경제지표
+yfinance>=1.4.0, <2.0.0         # Yahoo Finance (BDI, DXY, MOVE 등, 자주 API 깨져서 범위로 핀)
+pykrx>=1.0.45            # 한국 거래소 (KOSPI/KOSDAQ). 1.2.x 권장.
+requests==2.32.3         # 한국은행 ECOS REST API 직접 호출
+
+# --- 설정 및 환경 변수 ---
+pyyaml==6.0.1            # variables.yaml 파싱
+python-dotenv==1.0.1     # .env 로드
+
+# --- 분석 ---
+scikit-learn==1.5.0      # k-NN, StandardScaler
+
+# --- 시각화 / 웹앱 ---
+streamlit==1.35.0
+plotly==5.22.0
+matplotlib==3.8.4        # backtest_dynamics.py 그리드 PNG 출력용
+streamlit-plotly-events==0.0.6  # 그래프 클릭 이벤트 (종합 시계열 클릭 인터랙션)
+streamlit-option-menu==0.3.13   # 가로 탭 메뉴 (라디오 버튼 대체)
+
+# --- 테스트 ---
+pytest==8.2.2
+pytest-mock==3.14.0      # API 실패 시나리오 모킹
+
+# --- 개발 편의 (선택) ---
+ipython==8.25.0

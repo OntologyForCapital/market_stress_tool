@@ -1,0 +1,403 @@
+# =============================================================================
+# Market Stress Tool - 변수 명세 (Variables Specification)
+# =============================================================================
+# 본 파일은 15개 핵심 거시 변수의 메타데이터를 정의합니다.
+#
+# 필드 정의:
+#   code            : 내부 식별자 (코드에서 사용)
+#   name_kr         : 한국어 표시명 (UI/리포트용)
+#   name_en         : 영어 표시명
+#   source          : 데이터 출처 (fred | yfinance | ecos | pykrx | computed)
+#   series_id       : 출처별 시리즈 코드
+#   channel         : 1~5 (5개 거시 채널)
+#   risk_direction  : positive | negative
+#                     - positive: 값이 클수록 위험 증가 → 표준화 결과 그대로 사용
+#                     - negative: 값이 클수록 위험 감소 → 표준화 후 부호 반전(-1 곱함)
+#   unit            : 단위 (해석 보조용)
+#   frequency       : daily | weekly | monthly (정렬 단계에서 fill 정책 결정)
+#   enabled         : true | false (1차 프로토타입에서 사용 여부)
+#   notes           : 한계/주의사항 메모
+#
+# 5개 채널 정의:
+#   1. 실질 현금흐름 (분자)      - 기업의 미래 현금흐름 기대
+#   2. 무위험 실질금리 (분모)    - 할인율의 무위험 성분
+#   3. 위험프리미엄 (분모)        - 할인율의 위험 보상 성분
+#   4. 공급충격 (SRAS)           - 원자재/공급망 비용 충격
+#   5. 환율 및 자본흐름           - 한국 시장 특유의 외국인 자본 채널
+#
+# 부호 규칙 (표준화 후):
+#   양수(+) = 위험 증가 방향
+#   음수(-) = 위험 감소 방향
+#   → 모든 변수의 z-score는 risk_direction 적용 후 위 규칙을 따릅니다.
+# =============================================================================
+
+channels:
+  1:
+    name_kr: "실질 현금흐름"
+    name_en: "Real Cash Flow"
+    description: "기업의 미래 현금흐름 기대치를 나타내는 채널. 글로벌 제조업 사이클과 한국 수출이 핵심 신호."
+  2:
+    name_kr: "무위험 실질금리"
+    name_en: "Risk-Free Real Rate"
+    description: "할인율의 무위험 성분. 미국 실질금리, BEI, 정책금리 기대, 한미 금리차로 구성."
+  3:
+    name_kr: "위험프리미엄"
+    name_en: "Risk Premium"
+    description: "할인율의 위험 보상 성분. VIX, MOVE(가능 시), HY 스프레드, 달러 강세로 측정."
+  4:
+    name_kr: "공급충격"
+    name_en: "Supply Shock (SRAS)"
+    description: "원자재 가격 충격에 의한 비용 인플레이션 채널. 1차에서는 Brent 유가로 대표."
+  5:
+    name_kr: "환율 및 자본흐름"
+    name_en: "FX & Capital Flow"
+    description: "한국 시장 특유 채널. 원/달러, 엔/달러로 자본 유출 압력 측정."
+
+# -----------------------------------------------------------------------------
+# 변수 목록 (15개)
+# -----------------------------------------------------------------------------
+variables:
+
+  # ===== 채널 1: 실질 현금흐름 (분자) =====
+  - code: INDPRO
+    name_kr: "미국 산업생산지수"
+    name_en: "US Industrial Production Index"
+    source: fred
+    series_id: INDPRO
+    channel: 1
+    risk_direction: negative   # INDPRO 낮을수록 위험 ↑
+    unit: index
+    frequency: monthly
+    enabled: true
+    transform: yoy_pct          # v13: 산업생산은 yoy %가 표준
+    notes: "실물 경기 동행지표. ISM PMI(NAPM)는 2016년 FRED에서 폐지되어 산업생산지수로 대체. 2017=100 기준."
+
+  - code: KR_EXPORT
+    name_kr: "한국 수출 증가율 (YoY)"
+    name_en: "Korea Export Growth YoY"
+    source: ecos
+    series_id: "403Y001"        # 통관기준 수출입(월별) - 1차에선 더미로 대체 가능
+    item_code: "*AA"            # 총수출 (실제 ECOS 호출 시 점검 필요)
+    channel: 1
+    risk_direction: negative   # 수출 증가율 낮을수록 위험 ↑
+    unit: percent_yoy
+    frequency: monthly
+    enabled: true
+    transform: level            # v13: 이미 YoY % 시리즈 → 추가 변환 불필요
+    notes: |
+      ECOS API 호출. 1차 프로토타입에서 ECOS 연결 실패 시 더미 데이터로 폴백.
+      한국 코스피 EPS와 강한 상관. 가공 단계에서 YoY 변환 필요.
+
+  - code: BDI
+    name_kr: "발틱 건화물 지수"
+    name_en: "Baltic Dry Index"
+    source: yfinance
+    series_id: "IYT"             # 주력: iShares Transportation ETF (안정적)
+    fallback_series_id: "BDRY"   # 폴백: BDI ETF (2018-03+, 종종 깨짐)
+    channel: 1
+    risk_direction: negative
+    unit: index
+    frequency: daily
+    enabled: true
+    transform: pct_change_6m    # v13: 운송·무역 활동 모멘텀 (6개월 변화율)
+    notes: |
+      BDI 직접 시리즈(^BDIY)는 yfinance에서 불안정.
+      IYT(미국 운송업체 주가 ETF)로 대체. 운임 자체는 아니지만 글로벌 무역 활동의 대용 지표.
+      IYT 2003년 상장, 일별 데이터 안정.
+
+  - code: SP500_EPS
+    name_kr: "S&P 500 EPS 컨센서스"
+    name_en: "S&P 500 EPS Consensus"
+    source: fred
+    series_id: null             # 무료로 안정적 수집 어려움
+    channel: 1
+    risk_direction: negative
+    unit: usd_per_share
+    frequency: weekly
+    enabled: false              # 1차 프로토타입 제외
+    transform: level            # v13: 비활성화 변수도 일관성 위해 명시
+    notes: |
+      [한계] FactSet/Refinitiv 등 유료 데이터. FRED에는 컨센서스 시리즈 없음.
+      1차 프로토타입에서 비활성화. 추후 IBES 등 유료 데이터 연결 시 활성화.
+
+  # ===== 채널 2: 무위험 실질금리 (분모) =====
+  - code: US_TIPS_10Y
+    name_kr: "미국 10년 TIPS 실질금리"
+    name_en: "US 10Y TIPS Real Yield"
+    source: fred
+    series_id: DFII10
+    channel: 2
+    risk_direction: positive   # 실질금리 높을수록 할인율 ↑ → 위험 ↑
+    unit: percent
+    frequency: daily
+    enabled: true
+    transform: diff_6m          # v13: 실질금리는 변화 폭이 중요 (단위: pp)
+    notes: "글로벌 자산 가격의 핵심 할인율. 2022년 충격의 주범."
+
+  - code: US_BEI_10Y
+    name_kr: "미국 10년 기대인플레이션 (BEI)"
+    name_en: "US 10Y Breakeven Inflation"
+    source: fred
+    series_id: T10YIE
+    channel: 2
+    risk_direction: bidirectional       # v14: positive → bidirectional (양면성 처리)
+    bidirectional_threshold: 1.0        # v14: 적정 밴드 ±1.0σ (도메인 재정의 가능)
+    unit: percent
+    frequency: daily
+    enabled: true
+    transform: diff_6m          # v13: 기대인플레 변화 (단위: pp)
+    notes: |
+      [v14] risk_direction을 bidirectional로 전환. 인플레 기대의 변화율(diff_6m)이
+      ±1.0σ 밴드를 벗어난 정도를 양방향 위기 신호로 처리.
+        - 위로 벗어남: 인플레 기대 급등 (긴축 우려, 2022 인플레 시기)
+        - 아래로 벗어남: 디플레 공포 (예: 코로나 2020-03)
+      추후 anchor 기반 처리 (Fed 2% 목표 대비 편차) 검토 가능하나
+      v14에서는 5년 평균 기반 유지.
+
+  - code: US_POLICY_RATE_EXPECT
+    name_kr: "미국 정책금리 (현 수준 근사)"
+    name_en: "US Policy Rate (current proxy)"
+    source: fred
+    series_id: DFEDTARU         # Fed Funds Upper Target
+    channel: 2
+    risk_direction: positive
+    unit: percent
+    frequency: daily
+    enabled: true
+    transform: diff_6m          # v13: 정책금리 변화 (매파 전환 포착, 단위: pp)
+    notes: |
+      [한계] 본래 Fed Funds 선물 내재 기대치를 써야 하나 무료 수집 어려움.
+      1차에서는 현 정책금리(DFEDTARU)로 근사. 
+      추후 30-day Fed Funds Futures 데이터 연결 시 교체.
+
+  - code: KR_US_RATE_DIFF
+    name_kr: "한미 정책금리차 (한국 - 미국)"
+    name_en: "KR-US Policy Rate Differential"
+    source: computed
+    series_id: null
+    components:
+      kr_rate: { source: ecos, stat_code: "722Y001" }   # 한국 기준금리
+      us_rate: { source: fred, series_id: "DFF" }        # 미국 Effective FFR
+    channel: 2
+    risk_direction: negative   # 한국 < 미국 → 자본유출 위험 ↑ (음수 클수록 위험)
+    unit: percentage_points
+    frequency: daily
+    enabled: true
+    transform: diff_6m          # v13: 금리차 변화 (단위: pp)
+    notes: |
+      계산식: KR_Base_Rate - US_FFR
+      음수일수록 한국이 낮음 → 자본 유출 압력 ↑ → risk_direction=negative 로 처리
+      (표준화 후 부호 반전하여 "음수 차이 = 양의 스트레스"로 변환)
+
+  # ===== 채널 3: 위험프리미엄 (분모) =====
+  - code: VIX
+    name_kr: "VIX (S&P 500 변동성 지수)"
+    name_en: "CBOE VIX"
+    source: fred
+    series_id: VIXCLS
+    channel: 3
+    risk_direction: positive
+    unit: index
+    frequency: daily
+    enabled: true
+    transform: level            # v13: 변동성 자체가 이미 변화율 함의
+    notes: "주식 위험프리미엄 대표 지표."
+
+  - code: MOVE
+    name_kr: "MOVE (미국채 변동성)"
+    name_en: "ICE BofA MOVE Index"
+    source: yfinance
+    series_id: "^MOVE"
+    channel: 3
+    risk_direction: positive
+    unit: index
+    frequency: daily
+    enabled: false              # 1차 프로토타입에서는 옵셔널
+    transform: level            # v13: 비활성화 변수도 일관성 위해 명시
+    notes: |
+      [한계] yfinance에서 ^MOVE 안정적 조회 불가능한 경우 많음.
+      1차에서는 disabled. 실 운영에서 ICE BofAML 라이선스 필요.
+      활성화하려면 enabled: true 변경 후 fetch 성공 여부 확인.
+
+  - code: US_HY_SPREAD
+    name_kr: "미국 신용 스프레드 (Moody's Baa)"
+    name_en: "Moody's Baa - 10Y Treasury Spread"
+    source: fred
+    series_id: BAA10Y
+    channel: 3
+    risk_direction: positive
+    unit: percent
+    frequency: daily
+    enabled: true
+    transform: level            # v13: 스프레드는 수준이 신용 위험 측정
+    notes: |
+      [한계] 원래 ICE BofA HY OAS (BAMLH0A0HYM2) 사용 의도.
+      2026-04부터 FRED가 최근 3년치만 제공하여 백테스트 불가.
+      대체: Moody's Baa Corporate Bond Yield - 10Y Treasury (BAA10Y).
+      IG(투자등급) 스프레드라 HY보다 위기 민감도 약하지만 신용 위험 채널 신호로 충분.
+      1986년부터 daily.
+ 
+  - code: DXY
+    name_kr: "달러 인덱스 (Broad)"
+    name_en: "US Dollar Index (Broad)"
+    source: fred
+    series_id: DTWEXBGS
+    channel: 3
+    risk_direction: positive
+    unit: index
+    frequency: daily
+    enabled: true
+    transform: pct_change_6m    # v13: 달러 모멘텀 (6개월 변화율)
+    notes: |
+      FRED Nominal Broad U.S. Dollar Index. 26개 무역상대 통화 가중.
+      USDX(yfinance DX-Y.NYB, 6개 통화)와 정의는 다르지만 '달러 강세 신호'로는 동등.
+      2006년부터 일별, FRED라 안정.
+ 
+  # ===== 채널 4: 공급충격 (SRAS) =====
+  - code: BRENT
+    name_kr: "브렌트 유가"
+    name_en: "Brent Crude Oil"
+    source: fred
+    series_id: DCOILBRENTEU
+    channel: 4
+    risk_direction: bidirectional       # v14: positive → bidirectional (양면성 처리)
+    bidirectional_threshold: 1.0        # v14: 적정 밴드 ±1.0σ (도메인 재정의 가능)
+    unit: usd_per_barrel
+    frequency: daily
+    enabled: true
+    transform: pct_change_6m    # v13: 유가 모멘텀 (6개월 변화율)
+    notes: |
+      [v14] risk_direction을 bidirectional로 전환. 적정 밴드 ±1.0σ 벗어난 정도를
+      양방향 위기 신호로 처리 (pct_change_6m 변환 후 z-score 기준).
+        - 위로 벗어남: 유가 급등 (공급 충격 / 인플레 우려, 예: 2026-03 이란 전쟁)
+        - 아래로 벗어남: 수요 둔화 (수요 폭락 = 글로벌 침체 신호, 예: 2020-03 코로나, 2015-08 China shock)
+      v13: pct_change_6m 도입 / v14: 양면성 해소.
+
+  # ===== 채널 5: 환율 및 자본흐름 =====
+  - code: KRW_USD
+    name_kr: "원/달러 환율"
+    name_en: "KRW per USD"
+    source: fred
+    series_id: DEXKOUS
+    channel: 5
+    risk_direction: positive   # 원화 약세(환율 상승) = 자본유출 위험 ↑
+    unit: krw_per_usd
+    frequency: daily
+    enabled: true
+    transform: pct_change_6m    # v13: 환율 모멘텀 (6개월 변화율)
+    notes: "한국 외국인 자본 유출 1차 신호."
+
+  - code: JPY_USD
+    name_kr: "엔/달러 환율"
+    name_en: "JPY per USD"
+    source: fred
+    series_id: DEXJPUS
+    channel: 5
+    risk_direction: positive   # 엔 약세 = 아시아 통화 약세 동조 위험
+    unit: jpy_per_usd
+    frequency: daily
+    enabled: true
+    transform: pct_change_6m    # v13: 환율 모멘텀 (6개월 변화율)
+    notes: "아시아 통화 동조성 측정. 엔 약세 시 원화도 동반 약세 경향."
+
+
+# -----------------------------------------------------------------------------
+# 보조 변수 (분석 대상 + 백테스트 타겟)
+# -----------------------------------------------------------------------------
+target_variables:
+  - code: KOSPI
+    name_kr: "코스피 지수"
+    name_en: "KOSPI Index"
+    source: krx
+    series_id: "코스피"           # krx 코스피 코드
+    frequency: daily
+    notes: "k-NN 유사 시점 이후 성과 측정용 (30/90/180일 변화율)."
+
+  - code: KOSDAQ
+    name_kr: "코스닥 지수"
+    name_en: "KOSDAQ Index"
+    source: krx
+    series_id: "코스닥"
+    frequency: daily
+    notes: "보조 타겟. 1차에서는 KOSPI 중심으로 분석."
+
+
+# -----------------------------------------------------------------------------
+# 보조 데이터 (1차에서는 표시만, 스트레스 지수 산정 제외)
+# -----------------------------------------------------------------------------
+auxiliary_variables:
+  - code: FOREIGN_NET_BUY
+    name_kr: "외국인 순매수 (KOSPI)"
+    name_en: "Foreign Net Buy (KOSPI)"
+    source: pykrx
+    series_id: null
+    frequency: daily
+    enabled: false              # 1차 보조용
+    notes: |
+      pykrx로 수집 가능하나 1차 프로토타입에서는 스트레스 지수에 미포함.
+      대시보드에 참고 지표로만 표시.
+
+
+# -----------------------------------------------------------------------------
+# 채널 가중치 (스트레스 지수 산정 시)
+# -----------------------------------------------------------------------------
+# 1차 프로토타입: 5개 채널 동일 가중치 (단순 평균)
+# 추후 회귀 기반 또는 PCA 기반 가중치로 개선 가능
+channel_weights:
+  1: 0.20
+  2: 0.20
+  3: 0.20
+  4: 0.20
+  5: 0.20
+
+
+# -----------------------------------------------------------------------------
+# 임계값 (분석 모듈 기본값, Streamlit에서 조정 가능)
+# -----------------------------------------------------------------------------
+thresholds:
+  variable_alert: 1.5           # 진원지 추적: 변수 z-score가 이를 넘으면 "발화"
+  channel_alert: 1.5            # 채널 점수 경보 임계값
+  origin_lookback_days: 60      # 진원지 추적 룩백 기간
+  knn_k: 20                     # k-NN 기본 K
+  knn_exclude_recent_days: 60   # k-NN에서 직전 N일 제외
+  rolling_window_years: 5       # 표준화 롤링 윈도우 (년)
+  ffill_limit_days: 30          # forward fill 최대 한도 (일)
+  bidirectional_threshold_default: 1.0  # v14: bidirectional 변수의 전역 기본 임계값 (σ). 변수별 bidirectional_threshold로 override 가능.
+  composite_method: l2_norm     # v15: 종합점수 산출 방식. "mean" (가중평균, 부호 보존) | "l2_norm" (RMS, 위험 강도). 기본 l2_norm.
+
+
+# -----------------------------------------------------------------------------
+# 패턴 분류 규칙 (pattern_diagnosis.py에서 사용)
+# -----------------------------------------------------------------------------
+# S1~S5는 각각 채널 1~5의 점수
+pattern_rules:
+  system_crisis:
+    name_kr: "시스템 위기형"
+    conditions: "S1>1.5 AND S2>1.5 AND S3>2.0 AND S5>1.5"
+    severity: critical
+    color: "#8B0000"
+  risk_premium_shock:
+    name_kr: "위험프리미엄 충격형"
+    conditions: "S3>2.0 AND S1<1.0 AND S2<1.0"
+    severity: high
+    color: "#FF4500"
+  rate_shock:
+    name_kr: "금리 충격형"
+    conditions: "S2>1.5 AND S3<1.5"
+    severity: medium
+    color: "#FFA500"
+  real_recession:
+    name_kr: "실물 침체형"
+    conditions: "S1>1.5 AND MA30(S1) > MA60(S1)"
+    severity: high
+    color: "#DC143C"
+  supply_shock:
+    name_kr: "공급충격형"
+    conditions: "S4>2.0 AND S1<1.5"
+    severity: medium
+    color: "#DAA520"
+  normal:
+    name_kr: "정상"
+    conditions: "그 외"
+    severity: low
+    color: "#2E8B57"

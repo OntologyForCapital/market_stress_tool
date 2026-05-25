@@ -1,0 +1,40 @@
+# 환경 변수 (절대 커밋 금지)
+.env
+
+# 데이터 캐시
+data/raw/*.parquet
+data/processed/*.parquet
+data/raw/*.csv
+data/processed/*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# 가상환경
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+backtest_results*.csv
+backtest_var_zscores_*.csv
+dynamics_*.csv
+dynamics_*.png
+kospi.csv
+kospi_long.csv
+data/
