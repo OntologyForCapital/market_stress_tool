@@ -175,11 +175,12 @@ KNN_COLUMN_LABELS_KR: dict[str, str] = {
 
 # =============================================================================
 # 위험 방향 라벨
-# v14: bidirectional 추가 (BRENT, US_BEI_10Y 등 양쪽 꼬리가 모두 위험인 변수).
+# v14: bidirectional 추가. v22: positive_tail 추가 (예: BRENT 유가 상승 꼬리).
 # =============================================================================
 RISK_DIRECTION_LABELS_KR: dict[str, str] = {
     "positive": "↑ 값이 클수록 위험 증가",
     "negative": "↓ 값이 클수록 위험 감소",
+    "positive_tail": "↑ 상승 꼬리만 위험 신호",
     "bidirectional": "↕ 적정 밴드 ±1.0σ 벗어난 정도가 위험 신호",
 }
 

@@ -10,9 +10,10 @@
 #   source          : 데이터 출처 (fred | yfinance | ecos | computed)
 #   series_id       : 출처별 시리즈 코드
 #   channel         : 1~5 (5개 거시 채널)
-#   risk_direction  : positive | negative | bidirectional
+#   risk_direction  : positive | negative | positive_tail | bidirectional
 #                     - positive: 값이 클수록 위험 증가 → 표준화 결과 그대로 사용
 #                     - negative: 값이 클수록 위험 감소 → 표준화 후 부호 반전(-1 곱함)
+#                     - positive_tail: 값이 높을 때만 위험 → 음수 z-score는 0으로 처리
 #                     - bidirectional: 양쪽 꼬리 모두 위험 → |z|가 임계값을 넘은 부분만 사용
 #   unit            : 단위 (해석 보조용)
 #   frequency       : daily | weekly | monthly (정렬 단계에서 fill 정책 결정)
@@ -261,18 +262,17 @@ variables:
     source: fred
     series_id: DCOILBRENTEU
     channel: 4
-    risk_direction: bidirectional       # v14: positive → bidirectional (양면성 처리)
-    bidirectional_threshold: 1.0        # v14: 적정 밴드 ±1.0σ (도메인 재정의 가능)
+    risk_direction: positive_tail       # v22: 유가 상승만 공급충격 위험으로 반영
     unit: usd_per_barrel
     frequency: daily
     enabled: true
     transform: pct_change_6m    # v13: 유가 모멘텀 (6개월 변화율)
     notes: |
-      [v14] risk_direction을 bidirectional로 전환. 적정 밴드 ±1.0σ 벗어난 정도를
-      양방향 위기 신호로 처리 (pct_change_6m 변환 후 z-score 기준).
-        - 위로 벗어남: 유가 급등 (공급 충격 / 인플레 우려, 예: 2026-03 이란 전쟁)
-        - 아래로 벗어남: 수요 둔화 (수요 폭락 = 글로벌 침체 신호, 예: 2020-03 코로나, 2015-08 China shock)
-      v13: pct_change_6m 도입 / v14: 양면성 해소.
+      [v22] 한국 주식시장 관점에서 유가 하락은 비용/물가 부담 완화로 호재 또는
+      중립에 가깝기 때문에, 변동성 자체가 아니라 상승 꼬리만 공급충격 위험으로 처리.
+      pct_change_6m 변환 후 robust z-score가 양수일 때만 신호를 남기고,
+      음수 z-score(유가 하락 모멘텀)는 0으로 처리해 RMS 종합점수에 들어가지 않게 함.
+      v13: pct_change_6m 도입 / v14: 양면성 처리 / v22: 상승 꼬리 전용 처리.
 
   # ===== 채널 5: 환율 및 자본흐름 =====
   - code: KRW_USD

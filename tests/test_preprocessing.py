@@ -247,6 +247,24 @@ class TestStandardize:
             non_nan["X_POS"].values, -non_nan["X_NEG"].values, decimal=10
         )
 
+    def test_panel_positive_tail_clips_negative_values(self):
+        """[Unit] risk_direction='positive_tail' 변수는 음수 z-score를 0 처리."""
+        rng = np.random.default_rng(101)
+        n = TRADING_DAYS_PER_YEAR * 6
+        idx = pd.bdate_range("2018-01-01", periods=n)
+        x = pd.Series(rng.normal(0, 1, size=n), index=idx, name="X")
+        df = pd.DataFrame({"X_TAIL": x})
+
+        out = standardize_panel(
+            df,
+            risk_directions={"X_TAIL": "positive_tail"},
+            window_years=5,
+        )
+        valid = out["X_TAIL"].dropna()
+        assert not valid.empty
+        assert (valid >= 0).all()
+        assert (valid == 0).any()
+
     def test_panel_invalid_direction_raises(self):
         """[Unit] 잘못된 risk_direction은 ValueError."""
         df = pd.DataFrame({"X": [1.0, 2.0, 3.0]},

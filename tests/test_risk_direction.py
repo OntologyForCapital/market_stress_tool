@@ -5,7 +5,7 @@
     - src.preprocessing.standardize.standardize_panel (양방향 통합)
     - src.config.VALID_RISK_DIRECTIONS
     - src.config.load_bidirectional_thresholds / load_bidirectional_threshold_default
-    - variables.yaml: BRENT, US_BEI_10Y는 bidirectional + threshold=1.0
+    - variables.yaml: BRENT는 positive_tail, US_BEI_10Y는 bidirectional + threshold=1.0
 """
 
 from __future__ import annotations
@@ -55,6 +55,13 @@ class TestApplyRiskDirection:
         expected = pd.Series([2.0, 0.5, -0.0, -0.5, -2.0])
         pd.testing.assert_series_equal(out, expected)
 
+    def test_positive_tail_clips_benign_side(self):
+        """positive_tail: 양수 z만 남기고 음수 z는 0."""
+        z = pd.Series([-2.0, -0.5, 0.0, 0.5, 2.0])
+        out = apply_risk_direction(z, "positive_tail", threshold=1.0)
+        expected = pd.Series([0.0, 0.0, 0.0, 0.5, 2.0])
+        pd.testing.assert_series_equal(out, expected)
+
     def test_bidirectional_within_band_returns_zero(self):
         """bidirectional: |z| ≤ threshold 구간은 모두 0."""
         z = pd.Series([-1.0, -0.5, 0.0, 0.5, 1.0])
@@ -101,7 +108,7 @@ class TestApplyRiskDirection:
     def test_nan_propagation(self):
         """NaN은 모든 방향에서 NaN으로 전파."""
         z = pd.Series([np.nan, 1.5, np.nan])
-        for direction in ("positive", "negative", "bidirectional"):
+        for direction in ("positive", "negative", "positive_tail", "bidirectional"):
             out = apply_risk_direction(z, direction, threshold=1.0)
             assert pd.isna(out.iloc[0])
             assert pd.isna(out.iloc[2])
@@ -117,9 +124,9 @@ class TestApplyRiskDirection:
             apply_risk_direction(z, "POSITIVE")  # 대소문자 엄격
 
     def test_valid_directions_constant(self):
-        """VALID_RISK_DIRECTIONS 상수에 3종이 포함."""
+        """VALID_RISK_DIRECTIONS 상수에 4종이 포함."""
         assert VALID_RISK_DIRECTIONS == frozenset(
-            {"positive", "negative", "bidirectional"}
+            {"positive", "negative", "positive_tail", "bidirectional"}
         )
 
 
@@ -152,10 +159,10 @@ class TestStandardizePanelBidirectional:
         directions = {
             "VIX": "positive",
             "ISM_PMI": "negative",
-            "BRENT": "bidirectional",
+            "BRENT": "positive_tail",
             "US_BEI_10Y": "bidirectional",
         }
-        thresholds = {"BRENT": 1.0, "US_BEI_10Y": 1.0}
+        thresholds = {"US_BEI_10Y": 1.0}
         out = standardize_panel(
             panel, risk_directions=directions, bidirectional_thresholds=thresholds
         )
@@ -163,11 +170,11 @@ class TestStandardizePanelBidirectional:
         valid = out.dropna()
         assert not valid.empty
 
-        # bidirectional 결과는 모두 ≥ 0
+        # positive_tail/bidirectional 결과는 모두 ≥ 0
         assert (valid["BRENT"] >= 0).all()
         assert (valid["US_BEI_10Y"] >= 0).all()
 
-        # 밴드 내 평시(|z|≤1)는 0이어야 함 — 적어도 일부 시점은 0
+        # BRENT 하락 꼬리는 0, BEI 밴드 내 평시(|z|≤1)는 0
         assert (valid["BRENT"] == 0).any()
         assert (valid["US_BEI_10Y"] == 0).any()
 
@@ -178,39 +185,39 @@ class TestStandardizePanelBidirectional:
     def test_missing_threshold_uses_default(self):
         """bidirectional_thresholds에 없는 변수는 DEFAULT(1.0) 사용."""
         panel = self._make_panel(seed=1)
-        directions = {"BRENT": "bidirectional"}
+        directions = {"US_BEI_10Y": "bidirectional"}
         # thresholds 매핑이 None → DEFAULT 사용
         out_default = standardize_panel(
-            panel[["BRENT"]],
+            panel[["US_BEI_10Y"]],
             risk_directions=directions,
             bidirectional_thresholds=None,
         )
         out_explicit = standardize_panel(
-            panel[["BRENT"]],
+            panel[["US_BEI_10Y"]],
             risk_directions=directions,
-            bidirectional_thresholds={"BRENT": DEFAULT_BIDIRECTIONAL_THRESHOLD},
+            bidirectional_thresholds={"US_BEI_10Y": DEFAULT_BIDIRECTIONAL_THRESHOLD},
         )
         pd.testing.assert_series_equal(
-            out_default["BRENT"].dropna(),
-            out_explicit["BRENT"].dropna(),
+            out_default["US_BEI_10Y"].dropna(),
+            out_explicit["US_BEI_10Y"].dropna(),
         )
 
     def test_custom_threshold_changes_signal(self):
         """더 큰 threshold는 더 작은 신호(또는 0)를 산출."""
         panel = self._make_panel(seed=2)
-        directions = {"BRENT": "bidirectional"}
+        directions = {"US_BEI_10Y": "bidirectional"}
         out_1 = standardize_panel(
-            panel[["BRENT"]],
+            panel[["US_BEI_10Y"]],
             risk_directions=directions,
-            bidirectional_thresholds={"BRENT": 1.0},
+            bidirectional_thresholds={"US_BEI_10Y": 1.0},
         )
         out_2 = standardize_panel(
-            panel[["BRENT"]],
+            panel[["US_BEI_10Y"]],
             risk_directions=directions,
-            bidirectional_thresholds={"BRENT": 2.0},
+            bidirectional_thresholds={"US_BEI_10Y": 2.0},
         )
-        v1 = out_1["BRENT"].dropna()
-        v2 = out_2["BRENT"].dropna().reindex(v1.index)
+        v1 = out_1["US_BEI_10Y"].dropna()
+        v2 = out_2["US_BEI_10Y"].dropna().reindex(v1.index)
         # threshold 2.0 신호는 항상 1.0 신호 이하
         assert (v2 <= v1 + 1e-12).all()
 
@@ -273,12 +280,11 @@ class TestYamlBidirectionalLoading:
         p.write_text(yaml_text, encoding="utf-8")
         assert load_bidirectional_threshold_default(p) == DEFAULT_BIDIRECTIONAL_THRESHOLD
 
-    def test_load_bidirectional_thresholds_includes_brent_and_bei(self):
-        """v14 yaml: BRENT, US_BEI_10Y만 bidirectional 매핑에 포함."""
+    def test_load_bidirectional_thresholds_includes_bei_only(self):
+        """v22 yaml: US_BEI_10Y만 bidirectional 매핑에 포함."""
         thresholds = load_bidirectional_thresholds(YAML_PATH)
-        assert "BRENT" in thresholds
+        assert "BRENT" not in thresholds
         assert "US_BEI_10Y" in thresholds
-        assert thresholds["BRENT"] == 1.0
         assert thresholds["US_BEI_10Y"] == 1.0
 
     def test_load_bidirectional_thresholds_excludes_others(self):
@@ -327,10 +333,10 @@ thresholds:
         assert thresholds["A_VAR"] == 2.5  # 개별 오버라이드
         assert thresholds["B_VAR"] == 1.5  # 전역 기본값
 
-    def test_brent_and_bei_marked_bidirectional_in_yaml(self):
-        """v14 yaml: BRENT/US_BEI_10Y의 risk_direction이 bidirectional."""
+    def test_brent_positive_tail_and_bei_bidirectional_in_yaml(self):
+        """v22 yaml: BRENT는 positive_tail, US_BEI_10Y는 bidirectional."""
         directions = load_risk_directions(YAML_PATH)
-        assert directions.get("BRENT") == "bidirectional"
+        assert directions.get("BRENT") == "positive_tail"
         assert directions.get("US_BEI_10Y") == "bidirectional"
 
     def test_other_variables_directions_preserved(self):
@@ -349,7 +355,7 @@ thresholds:
         brent = variables.get("BRENT")
         bei = variables.get("US_BEI_10Y")
         assert brent is not None and bei is not None
-        assert brent.bidirectional_threshold == 1.0
+        assert brent.bidirectional_threshold is None
         assert bei.bidirectional_threshold == 1.0
         # bidirectional이 아닌 변수는 None
         for code, v in variables.items():

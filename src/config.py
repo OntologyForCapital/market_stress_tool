@@ -13,7 +13,7 @@
     load_variables       : variables 섹션 → list[Variable] (enabled 무관)
     load_target_variables: target_variables 섹션 → list[Variable]
     load_channel_mapping : {코드: 채널번호} (enabled=True만)
-    load_risk_directions : {코드: 'positive'|'negative'} (enabled=True만)
+    load_risk_directions : {코드: risk_direction} (enabled=True만)
     load_channel_weights : {채널번호: 가중치} (정규화 포함)
 """
 
@@ -39,8 +39,11 @@ VALID_TRANSFORMS: frozenset[str] = frozenset({"level", "yoy_pct", "pct_change_6m
 # v14: risk_direction 허용 값.
 #   positive      : z 그대로 (수치 ↑ = 위험 ↑)
 #   negative      : -z (수치 ↓ = 위험 ↑)
+#   positive_tail : max(z, 0) (수치 ↑ 꼬리만 위험, 낮은 값은 0)
 #   bidirectional : (|z| - threshold).clip(lower=0) — 양방향 임계값 초과 부분만 신호
-VALID_RISK_DIRECTIONS: frozenset[str] = frozenset({"positive", "negative", "bidirectional"})
+VALID_RISK_DIRECTIONS: frozenset[str] = frozenset({
+    "positive", "negative", "positive_tail", "bidirectional",
+})
 
 # v15: 종합점수(composite) 산출 방식.
 #   mean    : 종래 가중평균 (부호 보존, 채널 상쇄 가능)
@@ -98,7 +101,8 @@ class Variable:
         source          : 'fred' | 'yfinance' | 'ecos' | 'computed' | legacy 'krx' | 'pykrx'
         series_id       : 출처별 시리즈 코드 (computed면 None)
         channel         : 1~5 (target/auxiliary는 None)
-        risk_direction  : 'positive' | 'negative' (target/auxiliary는 None)
+        risk_direction  : 'positive' | 'negative' | 'positive_tail' | 'bidirectional'
+                          (target/auxiliary는 None)
         unit            : 단위
         frequency       : 'daily' | 'weekly' | 'monthly'
         enabled         : 1차 프로토타입 사용 여부 (target_variables는 항상 True 취급)

@@ -19,10 +19,12 @@ v18 기본값은 평균/표준편차가 아니라 median/MAD 기반 robust z-sco
 위험 방향 부호 반전:
     - risk_direction이 'negative'인 변수는 표준화 후 -1 곱함
     - 예: ISM_PMI는 낮을수록 위험 ↑ → z 계산 후 부호 반전하여 "양의 z = 위험"
+    - risk_direction이 'positive_tail'인 변수는 양수 z만 남기고 음수는 0 처리
+    - 예: BRENT는 유가 상승만 공급충격 위험으로 보고 유가 하락은 호재/중립 처리
 
 양방향 위험 처리 (v14):
     - risk_direction이 'bidirectional'인 변수는 양쪽 꼬리가 모두 위험
-    - 예: BRENT(유가 급등=공급쇼크, 급락=수요붕괴), US_BEI_10Y(인플레/디플레 모두 위험)
+    - 예: US_BEI_10Y(인플레/디플레 모두 위험)
     - 신호 변환: signal = max(|z| - threshold, 0) — ±threshold σ 밴드 내 평시는 0,
       밴드를 벗어나면 두 방향 모두 양수 신호로 변환 ("양수=위험" 규약 유지)
     - threshold 기본 1.0σ. 변수별로 bidirectional_threshold 오버라이드 가능.
@@ -184,9 +186,10 @@ def apply_risk_direction(
 
     Args:
         z: rolling_zscore 결과 시리즈.
-        risk_direction: 'positive' | 'negative' | 'bidirectional'.
+        risk_direction: 'positive' | 'negative' | 'positive_tail' | 'bidirectional'.
             - positive: 그대로 반환 (z가 클수록 위험).
             - negative: -z (작을수록 위험인 지표를 양수로 변환).
+            - positive_tail: max(z, 0) (상승 꼬리만 위험, 하락 꼬리는 0).
             - bidirectional: max(|z| - threshold, 0) — 양쪽 꼬리 모두 위험.
               ±threshold σ 밴드 내 평시는 0, 밴드 밖이면 두 방향 모두 양수 신호.
         threshold: bidirectional일 때만 사용하는 ±σ 밴드 폭. 기본 1.0σ.
@@ -206,6 +209,8 @@ def apply_risk_direction(
         return z
     if risk_direction == "negative":
         return -z
+    if risk_direction == "positive_tail":
+        return z.clip(lower=0)
     # bidirectional
     return (z.abs() - threshold).clip(lower=0)
 
@@ -288,7 +293,7 @@ def standardize_panel(
 
     Args:
         df: alignment.align_series 결과. 각 컬럼이 변수.
-        risk_directions: {변수 코드: 'positive' | 'negative' | 'bidirectional'}.
+        risk_directions: {변수 코드: 'positive' | 'negative' | 'positive_tail' | 'bidirectional'}.
             각 방향별 처리는 apply_risk_direction 참고.
         window_years: 롤링 윈도우 (년).
         min_periods_ratio: 최소 유효 관측치 비율.
