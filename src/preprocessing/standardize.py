@@ -7,6 +7,10 @@
     z_i(t) = (X_i(t) - μ_i(t)) / σ_i(t)
     μ, σ는 시점 t 기준 직전 5년 롤링 윈도우로 계산.
 
+v18 기본값은 평균/표준편차가 아니라 median/MAD 기반 robust z-score입니다.
+금융·거시 시계열은 위기 구간의 fat-tail과 단발성 API spike가 평균/표준편차를
+오염시키기 쉬우므로, 평시 중심과 산포를 robust하게 추정합니다.
+
 롤링 vs 전체 평균:
     - 전체 기간 평균은 미래 정보 누출 (앞 시점에서 미래 데이터를 사용)
     - 롤링 윈도우는 시점 t에서 t 이전 데이터만 사용 → look-ahead bias 없음
@@ -36,6 +40,11 @@ import numpy as np
 import pandas as pd
 
 from ..config import VALID_RISK_DIRECTIONS, DEFAULT_BIDIRECTIONAL_THRESHOLD
+from ..config import (
+    DEFAULT_STANDARDIZATION_METHOD,
+    DEFAULT_Z_CLIP_ABS,
+    VALID_STANDARDIZATION_METHODS,
+)
 
 
 # 1년 거래일 수 (대략)
@@ -43,6 +52,9 @@ TRADING_DAYS_PER_YEAR = 252
 
 # v13: 6개월 워밍아웃을 252/2이 아닌 126으로 고정 (의뢰서 명세)
 HALFYEAR_TRADING_DAYS = 126
+
+# 정규분포에서 MAD를 표준편차 추정량으로 맞추는 스케일.
+MAD_TO_SIGMA = 1.4826
 
 
 def rolling_zscore(
@@ -83,6 +95,84 @@ def rolling_zscore(
     z = (series - mu) / sigma
     z.name = series.name
     return z
+
+
+def rolling_robust_zscore(
+    series: pd.Series,
+    window_years: int = 5,
+    min_periods_ratio: float = 0.5,
+) -> pd.Series:
+    """단일 시리즈에 대해 rolling robust z-score를 계산.
+
+    중앙값과 MAD(median absolute deviation)를 사용하므로 극단치가 평균과
+    표준편차를 끌어당기는 문제를 줄인다. MAD가 0인 이산적/계단형 시계열은
+    동일 윈도우의 일반 표준편차를 보조 분모로 사용한다.
+    """
+    if series.empty:
+        return series.copy()
+
+    window = window_years * TRADING_DAYS_PER_YEAR
+    min_periods = max(2, int(window * min_periods_ratio))
+
+    median = series.rolling(window=window, min_periods=min_periods).median()
+
+    def _mad(values: np.ndarray) -> float:
+        vals = values[~np.isnan(values)]
+        if len(vals) == 0:
+            return float("nan")
+        med = np.median(vals)
+        return float(np.median(np.abs(vals - med)))
+
+    mad = series.rolling(window=window, min_periods=min_periods).apply(_mad, raw=True)
+    robust_sigma = (mad * MAD_TO_SIGMA).where(lambda s: s > 1e-12)
+
+    # 정책금리처럼 오래 평평하다가 계단식으로 움직이는 시계열은 MAD가 0이기 쉽다.
+    # 이 경우에만 표준편차를 보조 분모로 사용해 신호 소실을 피한다.
+    fallback_sigma = series.rolling(window=window, min_periods=min_periods).std(ddof=0)
+    fallback_sigma = fallback_sigma.where(fallback_sigma > 1e-12)
+    sigma = robust_sigma.fillna(fallback_sigma)
+
+    z = (series - median) / sigma
+    z.name = series.name
+    return z
+
+
+def rolling_percentile_rank(
+    series: pd.Series,
+    window_years: int = 5,
+    min_periods_ratio: float = 0.5,
+) -> pd.Series:
+    """현재 값의 rolling empirical percentile rank를 0~100으로 계산.
+
+    기존 선형 변환(50 + 20*z)은 정규분포를 암묵적으로 가정한다. 이 함수는
+    각 시점의 값을 그 시점까지의 롤링 분포와 직접 비교하므로 fat-tail,
+    비대칭, zero-inflated bidirectional 신호에 더 자연스럽다.
+    """
+    if series.empty:
+        return series.copy()
+
+    window = window_years * TRADING_DAYS_PER_YEAR
+    min_periods = max(2, int(window * min_periods_ratio))
+
+    def _percentile(values: np.ndarray) -> float:
+        current = values[-1]
+        if np.isnan(current):
+            return float("nan")
+        vals = values[~np.isnan(values)]
+        if len(vals) < min_periods:
+            return float("nan")
+        span = float(np.nanmax(vals) - np.nanmin(vals))
+        if span <= 1e-12:
+            return 50.0
+        less = float(np.sum(vals < current))
+        equal = float(np.sum(vals == current))
+        return ((less + 0.5 * equal) / len(vals)) * 100.0
+
+    out = series.rolling(window=window, min_periods=min_periods).apply(
+        _percentile, raw=True,
+    )
+    out.name = series.name
+    return out
 
 
 def apply_risk_direction(
@@ -143,10 +233,14 @@ def apply_transform(series: pd.Series, transform: str) -> pd.Series:
         return series
     if transform == "yoy_pct":
         # 1년(≈252영업일) 전 대비 % 변화
-        return series.pct_change(periods=TRADING_DAYS_PER_YEAR) * 100.0
+        return series.pct_change(
+            periods=TRADING_DAYS_PER_YEAR, fill_method=None,
+        ) * 100.0
     if transform == "pct_change_6m":
         # 6개월(≈126영업일) 전 대비 % 변화
-        return series.pct_change(periods=HALFYEAR_TRADING_DAYS) * 100.0
+        return series.pct_change(
+            periods=HALFYEAR_TRADING_DAYS, fill_method=None,
+        ) * 100.0
     if transform == "diff_6m":
         # 6개월 전 대비 단순 차분 (단위 유지)
         return series.diff(periods=HALFYEAR_TRADING_DAYS)
@@ -187,6 +281,8 @@ def standardize_panel(
     window_years: int = 5,
     min_periods_ratio: float = 0.5,
     bidirectional_thresholds: Mapping[str, float] | None = None,
+    method: str = DEFAULT_STANDARDIZATION_METHOD,
+    clip_abs: float | None = DEFAULT_Z_CLIP_ABS,
 ) -> pd.DataFrame:
     """패널(DataFrame) 전체에 대해 z-score 표준화 + 위험방향 규칙 적용.
 
@@ -199,6 +295,8 @@ def standardize_panel(
         bidirectional_thresholds: (v14) {변수 코드: ±σ 밴드 폭}. bidirectional
             변수에만 적용. 매핑에 없으면 DEFAULT_BIDIRECTIONAL_THRESHOLD(1.0)
             을 사용.
+        method: 'classic'이면 평균/표준편차, 'robust'이면 median/MAD 기반.
+        clip_abs: 위험방향 적용 전 z-score 절댓값 상한. None이면 비활성.
 
     Returns:
         같은 인덱스/컬럼의 DataFrame. 모든 값이 "양수=위험" 부호 규칙.
@@ -208,13 +306,29 @@ def standardize_panel(
     """
     if df.empty:
         return df.copy()
+    if method not in VALID_STANDARDIZATION_METHODS:
+        raise ValueError(
+            f"지원하지 않는 standardization_method 값: {method!r}. "
+            f"허용: {sorted(VALID_STANDARDIZATION_METHODS)}"
+        )
 
     thresholds = bidirectional_thresholds or {}
 
     out_cols: dict[str, pd.Series] = {}
     for col in df.columns:
-        z = rolling_zscore(df[col], window_years=window_years,
-                           min_periods_ratio=min_periods_ratio)
+        if method == "classic":
+            z = rolling_zscore(
+                df[col], window_years=window_years,
+                min_periods_ratio=min_periods_ratio,
+            )
+        else:
+            z = rolling_robust_zscore(
+                df[col], window_years=window_years,
+                min_periods_ratio=min_periods_ratio,
+            )
+
+        if clip_abs is not None:
+            z = z.clip(lower=-float(clip_abs), upper=float(clip_abs))
 
         direction = risk_directions.get(col, "positive")
         threshold = thresholds.get(col, DEFAULT_BIDIRECTIONAL_THRESHOLD)

@@ -11,7 +11,7 @@
         fred      → fred_loader.fetch_fred
         yfinance  → yfinance_loader.fetch_yfinance_with_fallback
         ecos      → ecos_loader.fetch_ecos (item_code 사용)
-        krx       → krx_loader.fetch_kospi / fetch_kosdaq (code 기준)
+        krx       → legacy alias. KOSPI/KOSDAQ도 yfinance로 우회
         computed  → 하위 components를 재귀 수집 후 산식 적용
         pykrx     → NotImplementedError (1차 비활성)
 
@@ -41,7 +41,6 @@ from src.data_collection import (
     fred_loader,
     yfinance_loader,
     ecos_loader,
-    krx_loader,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +54,11 @@ LOADER_EXCEPTIONS = (
     NotImplementedError,
     ValueError,
 )
+
+YFINANCE_INDEX_TICKERS: dict[str, str] = {
+    "KOSPI": "^KS11",
+    "KOSDAQ": "^KQ11",
+}
 
 
 # =============================================================================
@@ -211,25 +215,43 @@ def fetch_variable(
         # frequency → ECOS cycle 변환
         freq_to_cycle = {"daily": "D", "monthly": "M", "quarterly": "Q", "annual": "A"}
         cycle = freq_to_cycle.get(variable.frequency, "D")
-        s = ecos_loader.fetch_ecos(
-            stat_code=variable.series_id,
-            item_code=variable.item_code,
+        try:
+            s = ecos_loader.fetch_ecos(
+                stat_code=variable.series_id,
+                item_code=variable.item_code,
+                start_date=start_date,
+                end_date=end_date,
+                use_cache=use_cache,
+                cycle=cycle,
+            )
+        except TypeError as e:
+            # 구버전 테스트 더블/로더는 cycle 인자를 받지 않을 수 있다.
+            # 실제 로더는 cycle을 지원하므로 운영 경로는 위 호출을 사용한다.
+            if "cycle" not in str(e):
+                raise
+            s = ecos_loader.fetch_ecos(
+                stat_code=variable.series_id,
+                item_code=variable.item_code,
+                start_date=start_date,
+                end_date=end_date,
+                use_cache=use_cache,
+            )
+
+    elif src == "krx":
+        # v20: KRX Data Marketplace API 제약을 피하기 위해 KOSPI/KOSDAQ legacy
+        # source도 yfinance 지수 티커로 우회한다.
+        ticker = YFINANCE_INDEX_TICKERS.get(variable.code)
+        if ticker is None:
+            raise InvalidSeriesError(
+                f"legacy krx source는 KOSPI/KOSDAQ yfinance 우회만 지원. code={variable.code}"
+            )
+        s = yfinance_loader.fetch_yfinance_with_fallback(
+            primary_ticker=ticker,
+            fallback_ticker=None,
             start_date=start_date,
             end_date=end_date,
             use_cache=use_cache,
-            cycle=cycle
         )
-
-    elif src == "krx":
-        # KOSPI/KOSDAQ는 code 기준 라우팅 (각 전용 엔드포인트)
-        if variable.code == "KOSPI":
-            s = krx_loader.fetch_kospi(start_date, end_date, use_cache=use_cache)
-        elif variable.code == "KOSDAQ":
-            s = krx_loader.fetch_kosdaq(start_date, end_date, use_cache=use_cache)
-        else:
-            raise InvalidSeriesError(
-                f"krx source는 현재 KOSPI/KOSDAQ만 지원. code={variable.code}"
-            )
 
     elif src == "computed":
         s = _fetch_computed_variable(variable, start_date, end_date, use_cache=use_cache)
@@ -237,13 +259,13 @@ def fetch_variable(
     elif src == "pykrx":
         raise NotImplementedError(
             f"pykrx source는 현재 비활성화되어 있습니다. ({variable.code}) "
-            f"variables.yaml에서 source: krx로 변경하거나 enabled: false 처리하세요."
+            f"variables.yaml에서 source: yfinance로 변경하거나 enabled: false 처리하세요."
         )
 
     else:
         raise InvalidSeriesError(
             f"{variable.code}: 알 수 없는 source '{src}'. "
-            f"지원: fred | yfinance | ecos | krx | computed"
+            f"지원: fred | yfinance | ecos | computed | krx(legacy alias)"
         )
 
     # 시리즈 이름을 variable.code로 정규화 (각 로더가 다른 이름을 쓰므로)

@@ -405,9 +405,9 @@ class TestCacheUtilities:
             "20240102": [("코스피", 2669.81)],
             "20240103": [("코스피", 2607.31)],
         })
-        n_before = len(list(isolated_cache.glob("krx_dd_trd_*")))
+        n_before = len(list(isolated_cache.glob("krx_*_dd_trd_*")))
         deleted = krx.clear_krx_cache()
-        n_after = len(list(isolated_cache.glob("krx_dd_trd_*")))
+        n_after = len(list(isolated_cache.glob("krx_*_dd_trd_*")))
         assert n_after == 0
         assert deleted == n_before
 

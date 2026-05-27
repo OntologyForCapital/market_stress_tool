@@ -152,7 +152,7 @@ class TestStressIndex:
         var_to_ch, weights = load_channel_mapping_from_yaml(str(yaml_path))
         # 활성 변수 일부 검증
         assert var_to_ch["VIX"] == 3
-        assert var_to_ch["ISM_PMI"] == 1
+        assert var_to_ch["INDPRO"] == 1
         assert var_to_ch["KRW_USD"] == 5
         # 비활성 제외
         assert "MOVE" not in var_to_ch

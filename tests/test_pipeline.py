@@ -170,6 +170,8 @@ class TestRunFullDiagnosis:
         # 백분위는 0~100 범위
         if not math.isnan(result.composite_percentile):
             assert 0.0 <= result.composite_percentile <= 100.0
+        # 원자료 패널은 정합/표준화 전 값 확인용으로 보존
+        assert not result.raw_panel.empty
 
     def test_pattern_label_is_valid_key(self, synthetic_series_map):
         mock_fetch = _make_mock_fetch(synthetic_series_map)

@@ -112,40 +112,49 @@ class TestSourceRouting:
         assert called["item_code"] == "*AA"
         assert s.name == "KR_EXPORT"
 
-    def test_krx_kospi_routing(self, monkeypatch):
+    def test_legacy_krx_kospi_routes_to_yfinance(self, monkeypatch):
         called = {}
 
-        def mock_kospi(start, end, use_cache=True):
-            called["called"] = "kospi"
-            return _make_series("코스피")
+        def mock_yfin(primary_ticker, fallback_ticker, start_date, end_date, use_cache=True):
+            called["primary"] = primary_ticker
+            called["fallback"] = fallback_ticker
+            return _make_series(primary_ticker)
 
-        monkeypatch.setattr(dispatcher.krx_loader, "fetch_kospi", mock_kospi)
+        monkeypatch.setattr(
+            dispatcher.yfinance_loader, "fetch_yfinance_with_fallback", mock_yfin,
+        )
         v = _make_variable(
             "KOSPI", "krx", series_id="코스피",
             channel=None, risk_direction=None,
         )
         s = dispatcher.fetch_variable(v, "2024-01-01", "2024-01-10")
-        assert called["called"] == "kospi"
+        assert called["primary"] == "^KS11"
+        assert called["fallback"] is None
         assert s.name == "KOSPI"  # 정규화
 
-    def test_krx_kosdaq_routing(self, monkeypatch):
+    def test_legacy_krx_kosdaq_routes_to_yfinance(self, monkeypatch):
         called = {}
 
-        def mock_kosdaq(start, end, use_cache=True):
-            called["called"] = "kosdaq"
-            return _make_series("코스닥")
+        def mock_yfin(primary_ticker, fallback_ticker, start_date, end_date, use_cache=True):
+            called["primary"] = primary_ticker
+            called["fallback"] = fallback_ticker
+            return _make_series(primary_ticker)
 
-        monkeypatch.setattr(dispatcher.krx_loader, "fetch_kosdaq", mock_kosdaq)
+        monkeypatch.setattr(
+            dispatcher.yfinance_loader, "fetch_yfinance_with_fallback", mock_yfin,
+        )
         v = _make_variable(
             "KOSDAQ", "krx", series_id="코스닥",
             channel=None, risk_direction=None,
         )
         s = dispatcher.fetch_variable(v, "2024-01-01", "2024-01-10")
-        assert called["called"] == "kosdaq"
+        assert called["primary"] == "^KQ11"
+        assert called["fallback"] is None
+        assert s.name == "KOSDAQ"
 
     def test_krx_unknown_code_rejected(self, monkeypatch):
         v = _make_variable("UNKNOWN_KRX", "krx", series_id="기타지수")
-        with pytest.raises(InvalidSeriesError, match="KOSPI/KOSDAQ만 지원"):
+        with pytest.raises(InvalidSeriesError, match="KOSPI/KOSDAQ yfinance 우회만 지원"):
             dispatcher.fetch_variable(v, "2024-01-01", "2024-01-10")
 
     def test_pykrx_raises_not_implemented(self, monkeypatch):
@@ -391,14 +400,6 @@ class TestRealYamlIntegration:
             dispatcher.ecos_loader, "fetch_kr_base_rate",
             lambda s, e, use_cache=True: _make_series("kr_base"),
         )
-        monkeypatch.setattr(
-            dispatcher.krx_loader, "fetch_kospi",
-            lambda s, e, use_cache=True: _make_series("코스피"),
-        )
-        monkeypatch.setattr(
-            dispatcher.krx_loader, "fetch_kosdaq",
-            lambda s, e, use_cache=True: _make_series("코스닥"),
-        )
 
     def test_krw_usd_included(self, monkeypatch):
         """[작업 3 요구사항] enabled=True 변수 전체 수집 시 KRW_USD 포함."""
@@ -434,6 +435,14 @@ class TestRealYamlIntegration:
         )
         assert "KOSPI" in result
         assert "KOSDAQ" in result
+
+    def test_targets_use_yfinance_tickers(self):
+        """KOSPI/KOSDAQ 타겟은 KRX API 대신 yfinance 티커를 사용."""
+        targets = {v.code: v for v in load_target_variables()}
+        assert targets["KOSPI"].source == "yfinance"
+        assert targets["KOSPI"].series_id == "^KS11"
+        assert targets["KOSDAQ"].source == "yfinance"
+        assert targets["KOSDAQ"].series_id == "^KQ11"
 
     def test_disabled_variables_excluded(self, monkeypatch):
         """SP500_EPS, MOVE 같은 disabled 변수는 결과에 없음."""

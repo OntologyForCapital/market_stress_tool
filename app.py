@@ -5,22 +5,27 @@
 
 탭 구성:
     1) 메인 진단        — 현재 시장 스트레스 상태 + 채널/지도/시계열
-    2) 설명             — 도구의 가정·5채널·5패턴·한계
+    2) 세부 내용        — 현재 기준 변수별 상세
     3) 과거 데이터 조회 — 임의 날짜 진단 + 유사 시점 상세
+    4) 과거 세부 내용   — 과거 기준일의 변수별 상세
+    5) 설명             — 도구의 가정·5채널·5패턴·한계
+    6) 원자료 시계열    — 정합/변환 전 원자료 시계열
+    7) 통계 검증        — 이벤트 라벨/regime 기반 threshold 검증
 
-[KRX 약관 안내]
-    KRX 일별 데이터 사용에는 출처 표기 의무가 있으므로,
-    하단 푸터에 "한국거래소 통계정보"를 반드시 노출합니다.
+[데이터 출처 안내]
+    KOSPI/KOSDAQ 타겟은 v20부터 KRX API가 아니라 Yahoo Finance
+    (^KS11, ^KQ11)를 사용합니다.
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from datetime import date, datetime, timedelta
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 import yaml
 
@@ -28,6 +33,10 @@ from src.config import (
     load_channel_mapping,
     load_variables,
     load_target_variables,
+)
+from src.analysis.threshold_calibration import (
+    DEFAULT_CALIBRATION_EVENTS,
+    REGIME_LABELS_KR,
 )
 from src.pipeline import DiagnosisResult, run_full_diagnosis, z_to_percentile
 from src.ui import labels as L
@@ -37,6 +46,7 @@ from src.ui.charts import (
     make_composite_timeseries,
     make_geo_risk_map,
 )
+from src.ui.date_defaults import previous_business_day, today_kst
 from src.ui.details_tab import render_details_tab
 from src.ui.geo_map import make_world_geo_map_svg
 from src.ui.diagnosis_sentence import generate_diagnosis_sentence
@@ -82,8 +92,8 @@ st.set_page_config(
 # =============================================================================
 # 기본 기간 설정
 # =============================================================================
-# 기준일은 한국 영업일 기준 어제 (실데이터 의존, 사용자가 사이드바에서 조정 가능)
-DEFAULT_END_DATE = date(2026, 5, 22)
+# 기준일은 페이지 실행 시점의 한국 날짜 기준 직전 영업일
+DEFAULT_END_DATE = previous_business_day()
 # 표준화 5년 윈도우를 위해 6년 이상 이전부터 수집
 DEFAULT_START_DATE = date(DEFAULT_END_DATE.year - 6, 1, 1)
 
@@ -403,13 +413,20 @@ def render_timeseries_section(result: DiagnosisResult) -> None:
         st.warning("선택된 기간에 데이터가 없습니다.")
         return
 
-    fig = make_composite_timeseries(ts_view, height=360)
+    event_annotations = _event_annotations_for_timeseries(ts_view)
+    event_label_lanes = min(len(event_annotations), 3)
+    chart_height = 360 if not event_annotations else 390 + event_label_lanes * 50
+    fig = make_composite_timeseries(
+        ts_view,
+        height=chart_height,
+        event_annotations=event_annotations,
+    )
 
     if _HAS_PLOTLY_EVENTS:
         st.caption(UI_TEXTS["ts_breakdown_caption"])
         events = plotly_events(
             fig, click_event=True, hover_event=False, select_event=False,
-            key="ts_click", override_height=360,
+            key="ts_click", override_height=chart_height,
         )
         if events:
             clicked_x = events[0].get("x")
@@ -424,6 +441,23 @@ def render_timeseries_section(result: DiagnosisResult) -> None:
         st.caption(
             "그래프 클릭 인터랙션을 사용하려면 `streamlit-plotly-events`를 설치하세요."
         )
+
+
+def _event_annotations_for_timeseries(
+    ts_view: pd.Series,
+) -> list[tuple[pd.Timestamp, str]]:
+    """현재 조회 기간 안에 들어오는 주요 사건 라벨만 반환."""
+    if ts_view.empty:
+        return []
+
+    start = pd.Timestamp(ts_view.index.min())
+    end = pd.Timestamp(ts_view.index.max())
+    events: list[tuple[pd.Timestamp, str]] = []
+    for event in DEFAULT_CALIBRATION_EVENTS:
+        event_date = pd.Timestamp(event.date)
+        if start <= event_date <= end:
+            events.append((event_date, event.label))
+    return events
 
 
 def _render_breakdown_for_date(target_date: pd.Timestamp, result: DiagnosisResult) -> None:
@@ -521,6 +555,21 @@ def render_explain_tab(variables_meta: dict) -> None:
         "\"한 채널이 +2.5σ, 세 채널이 -0.5σ\"인 분산된 신호도 제대로 집계합니다."
     )
 
+    st.markdown("#### 통계 처리")
+    st.markdown(
+        "- **표준화**: 평균/표준편차 대신 median/MAD 기반 robust z-score를 기본값으로 사용합니다.\n"
+        "- **극단치 처리**: 위험방향 적용 전 z-score를 ±6σ로 제한해 단일 spike의 지수 지배를 완화합니다.\n"
+        "- **백분위**: 정규분포 선형 근사가 아니라 5년 rolling empirical percentile rank로 표시합니다."
+    )
+
+    st.markdown("#### 임계값 보정")
+    st.markdown(
+        "- **이벤트 라벨 보정**: 과거 주요 스트레스 시점 주변을 event window로 두고, "
+        "종합 z-score threshold의 precision/recall/F1을 계산합니다.\n"
+        "- **regime별 분위수**: KOSPI 63영업일 실현변동성으로 저·중·고변동 구간을 나눈 뒤, "
+        "각 regime 안에서 q80/q90/q95 경험적 임계값을 산출합니다."
+    )
+
     st.markdown("#### 5가지 패턴 분류")
     for key, name_kr in PATTERN_LABELS_KR.items():
         if key == "system_crisis":
@@ -547,8 +596,8 @@ def render_explain_tab(variables_meta: dict) -> None:
         "장기 추세가 있는 시리즈는 수익률/로그차분이 더 통계적으로 안정적입니다.\n"
         "5. **단일 라벨 분류** — 동시에 여러 충격이 일어나는 경우 한 라벨로 단순화됩니다. "
         "채널 막대를 함께 확인하세요.\n"
-        "6. **임계값 임의성** — 1.5σ, 2.0σ 같은 임계는 통계적 관습일 뿐 "
-        "이론적 절대 기준이 아닙니다.\n"
+        "6. **임계값 보정의 표본 한계** — 이벤트 라벨과 regime 분위수로 보정하지만, "
+        "위기 표본 수가 적어 과최적화 가능성이 남습니다.\n"
         "7. **시간 순서 ≠ 인과** — '진원지'는 1.5σ를 가장 먼저 돌파한 변수일 뿐, "
         "도구가 보지 못하는 외부 사건(지정학·정책 발표 등)이 진짜 원인일 수 있습니다.\n"
         "8. **k-NN은 분모 환경 유사성만 측정** — 유사 시점의 향후 수익률은 참고치이며, "
@@ -655,16 +704,376 @@ def render_history_tab(variables_meta: dict) -> None:
     render_footer()
 
 
+def _format_numeric_frame(df: pd.DataFrame, digits: int = 4) -> pd.DataFrame:
+    """Return a display-friendly rounded DataFrame."""
+    out = df.copy()
+    for col in out.columns:
+        if pd.api.types.is_numeric_dtype(out[col]):
+            out[col] = out[col].round(digits)
+    return out
+
+
+def _make_history_line_chart(df: pd.DataFrame, title: str, height: int = 360) -> go.Figure:
+    fig = go.Figure()
+    for col in df.columns:
+        s = df[col].dropna()
+        if s.empty:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=s.index,
+                y=s.values,
+                mode="lines",
+                name=str(col),
+                hovertemplate="%{x|%Y-%m-%d}<br>%{y:.4f}<extra></extra>",
+            )
+        )
+    fig.update_layout(
+        title=title,
+        height=height,
+        margin=dict(l=10, r=10, t=45, b=35),
+        plot_bgcolor="white",
+        xaxis=dict(title="", gridcolor="rgba(0,0,0,0.08)"),
+        yaxis=dict(title="", gridcolor="rgba(0,0,0,0.08)"),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.25),
+    )
+    return fig
+
+
+def render_history_detail_tab(result: DiagnosisResult, variables_meta: dict) -> None:
+    """특정 과거 기준일의 변수별 세부 내용."""
+    st.markdown(f"### {UI_TEXTS['history_detail_title']}")
+
+    data_start, data_end = result.data_period
+    min_d = data_start.date() if data_start is not None else date(2010, 1, 1)
+    max_d = min(DEFAULT_END_DATE, data_end.date()) if data_end is not None else DEFAULT_END_DATE
+
+    initial_target = st.session_state.get("history_detail_date", DEFAULT_END_DATE)
+    target_date = st.date_input(
+        "조회 기준일",
+        value=initial_target,
+        min_value=min_d,
+        max_value=max_d,
+        key="history_detail_date",
+    )
+
+    with st.spinner("과거 기준일의 세부 내용을 계산하고 있습니다..."):
+        try:
+            hist_result = run_diagnosis_cached(
+                start_date_iso=(pd.Timestamp(target_date) - pd.DateOffset(years=7)).date().isoformat(),
+                end_date_iso=DEFAULT_END_DATE.isoformat(),
+                as_of_iso=target_date.isoformat(),
+                use_cache=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            st.error(f"과거 세부내용 계산 실패: {e}")
+            render_footer()
+            return
+
+    pct = hist_result.composite_percentile
+    level_kr = L.percentile_to_level_label_kr(pct) if not math.isnan(pct) else "—"
+    st.caption(
+        f"기준일 {hist_result.as_of_date.date().isoformat()} · "
+        f"종합 {pct:.1f}점 ({level_kr}) · 패턴 {L.pattern_to_korean(hist_result.pattern_label)}"
+    )
+    render_details_tab(
+        hist_result,
+        variables_meta,
+        title=f"{hist_result.as_of_date.date().isoformat()} 기준 변수별 세부 정보",
+        intro="선택한 과거 기준일에 각 변수가 어떤 raw 값, z-score, 백분위를 가졌는지 확인합니다.",
+        key_prefix="history_details",
+    )
+    render_footer()
+
+
+def render_raw_timeseries_tab(result: DiagnosisResult, variables_meta: dict) -> None:
+    """정합/변환 전 원자료 시계열 탭."""
+    st.markdown(f"### {UI_TEXTS['raw_timeseries_title']}")
+    st.caption("API/로더에서 수집된 원자료입니다. 영업일 정합, forward-fill, 사전 변환, z-score 표준화가 적용되기 전 값입니다.")
+
+    raw_panel = result.raw_panel
+    if raw_panel is None or raw_panel.empty:
+        st.info("원자료 패널이 없습니다.")
+        render_footer()
+        return
+
+    data_start = raw_panel.index.min()
+    data_end = raw_panel.index.max()
+    default_start = max(data_start, data_end - pd.Timedelta(days=730))
+
+    from src.config import load_channel_mapping
+    variable_to_channel = load_channel_mapping()
+
+    channel_options = ["전체", "타깃·기타"] + [
+        f"채널 {ch} · {CHANNEL_LABELS_KR[ch]}" for ch in (1, 2, 3, 4, 5)
+    ]
+    col_a, col_b, col_c = st.columns([1, 1, 1.2])
+    with col_a:
+        start = st.date_input(
+            "시작일",
+            value=default_start.date(),
+            min_value=data_start.date(),
+            max_value=data_end.date(),
+            key="raw_ts_start",
+        )
+    with col_b:
+        end = st.date_input(
+            "종료일",
+            value=data_end.date(),
+            min_value=data_start.date(),
+            max_value=data_end.date(),
+            key="raw_ts_end",
+        )
+    with col_c:
+        channel_filter = st.selectbox("채널", channel_options, key="raw_ts_channel")
+
+    candidate_cols = list(raw_panel.columns)
+    if channel_filter.startswith("채널"):
+        ch = int(channel_filter.split()[1])
+        candidate_cols = [c for c in candidate_cols if variable_to_channel.get(c) == ch]
+    elif channel_filter == "타깃·기타":
+        candidate_cols = [c for c in candidate_cols if variable_to_channel.get(c) is None]
+
+    label_to_col = {
+        f"{code} · {L.variable_to_korean(str(code), variables_meta)}": str(code)
+        for code in candidate_cols
+    }
+    default_labels = list(label_to_col.keys())[: min(6, len(label_to_col))]
+    selected_labels = st.multiselect(
+        "표시 변수",
+        options=list(label_to_col.keys()),
+        default=default_labels,
+        key="raw_ts_columns",
+    )
+    selected_cols = [label_to_col[label] for label in selected_labels if label in label_to_col]
+    if not selected_cols:
+        st.info("표시할 변수를 선택하세요.")
+        render_footer()
+        return
+
+    mask = (raw_panel.index >= pd.Timestamp(start)) & (raw_panel.index <= pd.Timestamp(end))
+    view = raw_panel.loc[mask, selected_cols].copy()
+    if view.empty:
+        st.warning("선택한 기간에 원자료가 없습니다.")
+        render_footer()
+        return
+
+    st.plotly_chart(
+        _make_history_line_chart(view, "원자료 시계열", height=420),
+        use_container_width=True,
+        config={"displayModeBar": False},
+    )
+
+    st.markdown("#### 변수별 원자료")
+    for code in selected_cols:
+        series = view[code].dropna()
+        if series.empty:
+            continue
+        name = L.variable_to_korean(code, variables_meta)
+        latest_date = series.index[-1].strftime("%Y-%m-%d")
+        latest_val = series.iloc[-1]
+        with st.expander(f"`{code}` · {name}", expanded=False):
+            st.metric("선택 기간 마지막 관측값", f"{latest_val:,.4f}", help=latest_date)
+            fig = _make_history_line_chart(series.to_frame(code), f"{code} · {name}", height=220)
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+                config={"displayModeBar": False},
+                key=f"raw_ts_block_{code}",
+            )
+            tail = series.tail(20).to_frame("raw")
+            tail.insert(0, "date", tail.index.strftime("%Y-%m-%d"))
+            st.dataframe(_format_numeric_frame(tail), use_container_width=True, hide_index=True)
+
+    render_footer()
+
+
+def _calibration_level_to_kr(level: str) -> str:
+    return {
+        "normal": "정상권",
+        "watch": "주의권",
+        "high_regime": "고위험권",
+        "tail_alert": "꼬리위험권",
+        "event_alert": "이벤트 경보권",
+        "unknown": "미분류",
+    }.get(level, level)
+
+
+def _finite(value: object) -> bool:
+    try:
+        return value is not None and not math.isnan(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _make_calibration_chart(result: DiagnosisResult) -> go.Figure:
+    stress = result.stress_table
+    fig = go.Figure()
+    if stress is None or stress.empty or "composite" not in stress.columns:
+        return fig
+
+    score = stress["composite"].dropna()
+    fig.add_trace(
+        go.Scatter(
+            x=score.index,
+            y=score.values,
+            mode="lines",
+            line=dict(color="#1F77B4", width=1.8),
+            name="composite z",
+            hovertemplate="%{x|%Y-%m-%d}<br>z=%{y:.3f}<extra></extra>",
+        )
+    )
+
+    event_labels = result.calibration_event_labels
+    if event_labels is not None and not event_labels.empty:
+        event_mask = event_labels.reindex(score.index).fillna(False).astype(bool)
+        points = score[event_mask]
+        if not points.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=points.index,
+                    y=points.values,
+                    mode="markers",
+                    marker=dict(color="#D32F2F", size=5, opacity=0.65),
+                    name="event window",
+                    hovertemplate="%{x|%Y-%m-%d}<br>event z=%{y:.3f}<extra></extra>",
+                )
+            )
+
+    summary = result.calibration_summary or {}
+    hlines = [
+        ("label_threshold", "라벨 보정", "#D32F2F"),
+        ("regime_q90", "regime q90", "#F9A825"),
+        ("regime_q95", "regime q95", "#6A1B9A"),
+    ]
+    for key, label, color in hlines:
+        value = summary.get(key)
+        if _finite(value):
+            fig.add_hline(
+                y=float(value),
+                line_width=1.2,
+                line_dash="dash",
+                line_color=color,
+                annotation_text=f"{label}: {float(value):.2f}",
+                annotation_position="top left",
+                annotation_font_size=10,
+            )
+
+    fig.update_layout(
+        title="종합 스트레스 z-score와 보정 임계값",
+        height=380,
+        margin=dict(l=10, r=10, t=50, b=35),
+        plot_bgcolor="white",
+        xaxis=dict(title="", gridcolor="rgba(0,0,0,0.08)"),
+        yaxis=dict(title="composite z", gridcolor="rgba(0,0,0,0.08)"),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.22),
+    )
+    return fig
+
+
+def render_calibration_tab(result: DiagnosisResult) -> None:
+    """이벤트 라벨/변동성 regime 기반 통계 검증 탭."""
+    st.markdown(f"### {UI_TEXTS['calibration_title']}")
+
+    summary = result.calibration_summary or {}
+    if not summary:
+        st.info("보정 결과가 없습니다.")
+        render_footer()
+        return
+
+    col_1, col_2, col_3, col_4 = st.columns(4)
+    with col_1:
+        st.metric("현재 보정 레벨", _calibration_level_to_kr(str(summary.get("calibrated_level", "unknown"))))
+    with col_2:
+        st.metric("현재 composite z", f"{float(summary.get('current_score', float('nan'))):.2f}")
+    with col_3:
+        regime = str(summary.get("current_regime", "unknown"))
+        st.metric("현재 변동성 regime", REGIME_LABELS_KR.get(regime, regime))
+    with col_4:
+        threshold = summary.get("label_threshold")
+        st.metric("라벨 보정 임계값", f"{float(threshold):.2f}" if _finite(threshold) else "—")
+
+    st.plotly_chart(
+        _make_calibration_chart(result),
+        use_container_width=True,
+        config={"displayModeBar": False},
+    )
+
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
+        st.markdown("#### 이벤트 라벨 기준")
+        event_metrics = result.calibration_event_metrics
+        if event_metrics is None or event_metrics.empty:
+            st.info("이벤트 라벨 기준 threshold 성능표가 없습니다.")
+        else:
+            show_cols = [
+                "threshold", "threshold_percentile", "precision", "recall",
+                "f1", "alert_rate", "tp", "fp", "fn",
+            ]
+            view = event_metrics[show_cols].head(12).copy()
+            for col in ("threshold", "threshold_percentile", "precision", "recall", "f1", "alert_rate"):
+                view[col] = view[col].astype(float).round(3)
+            for col in ("tp", "fp", "fn"):
+                view[col] = view[col].astype(int)
+            view = view.rename(columns={
+                "threshold": "임계값",
+                "threshold_percentile": "분포 위치",
+                "precision": "정밀도",
+                "recall": "재현율",
+                "f1": "F1",
+                "alert_rate": "경보 빈도",
+                "tp": "TP",
+                "fp": "FP",
+                "fn": "FN",
+            })
+            st.dataframe(view, use_container_width=True, hide_index=True)
+
+    with col_b:
+        st.markdown("#### 변동성 regime별 분위수")
+        regime_thresholds = result.calibration_regime_thresholds
+        if regime_thresholds is None or regime_thresholds.empty:
+            st.info("regime별 threshold 표가 없습니다.")
+        else:
+            metric_options = [m for m in ["composite", "S1", "S2", "S3", "S4", "S5"]
+                              if m in set(regime_thresholds["metric"])]
+            metric = st.selectbox("지표", metric_options, key="calibration_metric")
+            view = regime_thresholds[regime_thresholds["metric"] == metric].copy()
+            keep_cols = ["regime_kr", "count", "q67", "q80", "q90", "q95"]
+            view = view[keep_cols].rename(columns={
+                "regime_kr": "regime",
+                "count": "관측수",
+                "q67": "q67",
+                "q80": "q80",
+                "q90": "q90",
+                "q95": "q95",
+            })
+            st.dataframe(_format_numeric_frame(view, digits=3), use_container_width=True, hide_index=True)
+
+    st.markdown("#### 보정 이벤트")
+    period_start, period_end = result.data_period
+    event_rows = [
+        {"date": e.date, "label": e.label}
+        for e in DEFAULT_CALIBRATION_EVENTS
+        if period_start is None
+        or period_end is None
+        or (period_start <= pd.Timestamp(e.date) <= period_end)
+    ]
+    st.dataframe(pd.DataFrame(event_rows), use_container_width=True, hide_index=True)
+    render_footer()
+
 
 def render_sidebar() -> tuple[date, date, date]:
     with st.sidebar:
+        current_date = today_kst()
         st.markdown(f"### {UI_TEXTS['app_title']}")
         st.markdown("##### 진단 기간")
         end_d = st.date_input(
             "기준일 (as_of)",
             value=DEFAULT_END_DATE,
             min_value=date(2010, 1, 1),
-            max_value=date.today(),
+            max_value=current_date,
             key="sidebar_as_of",
         )
         # 수집 시작일: 표준화 5년 윈도우 + 여유 1년
@@ -707,13 +1116,16 @@ def main() -> None:
             return
 
     # 작업 1+4+5: st.radio 기반 탭 라우팅
-    # 탭 순서: 메인 / 세부 내용 / 설명 / 과거 데이터 조회
-    tab_keys = ["main", "details", "explain", "history"]
+    # 탭 순서: 메인 / 세부 내용 / 과거 데이터 조회 / 과거 세부 내용 / 설명 / 원자료 시계열 / 통계 검증
+    tab_keys = ["main", "details", "history", "history_detail", "explain", "raw_timeseries", "calibration"]
     tab_labels = [
         UI_TEXTS["tab_main"],
         UI_TEXTS["tab_details"],
-        UI_TEXTS["tab_explain"],
         UI_TEXTS["tab_history"],
+        UI_TEXTS["tab_history_detail"],
+        UI_TEXTS["tab_explain"],
+        UI_TEXTS["tab_raw_timeseries"],
+        UI_TEXTS["tab_calibration"],
     ]
     key_to_label = dict(zip(tab_keys, tab_labels))
     label_to_key = dict(zip(tab_labels, tab_keys))
@@ -775,6 +1187,12 @@ def main() -> None:
         # 작업 4: 세부 내용 탭
         render_details_tab(result, variables_meta)
         render_footer()
+    elif selected_key == "history_detail":
+        render_history_detail_tab(result, variables_meta)
+    elif selected_key == "raw_timeseries":
+        render_raw_timeseries_tab(result, variables_meta)
+    elif selected_key == "calibration":
+        render_calibration_tab(result)
     elif selected_key == "explain":
         render_explain_tab(variables_meta)
     elif selected_key == "history":

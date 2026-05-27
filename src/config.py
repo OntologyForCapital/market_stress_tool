@@ -50,6 +50,21 @@ VALID_COMPOSITE_METHODS: frozenset[str] = frozenset({"mean", "l2_norm"})
 # v15: composite_method 전역 기본값. yaml 미설정 시 fallback.
 DEFAULT_COMPOSITE_METHOD: str = "l2_norm"
 
+# v18: 표준화 방식.
+#   classic : 롤링 평균/표준편차 기반 z-score
+#   robust  : 롤링 median/MAD 기반 robust z-score (fat-tail/이상치에 덜 민감)
+VALID_STANDARDIZATION_METHODS: frozenset[str] = frozenset({"classic", "robust"})
+DEFAULT_STANDARDIZATION_METHOD: str = "robust"
+
+# v18: 표시용 백분위 방식.
+#   linear    : 기존 50 + 20*z 선형 환산
+#   empirical : 과거 롤링 분포 내 percentile rank
+VALID_PERCENTILE_METHODS: frozenset[str] = frozenset({"linear", "empirical"})
+DEFAULT_PERCENTILE_METHOD: str = "empirical"
+
+# v18: 표준화 z-score 극단치 클리핑. None이면 비활성화.
+DEFAULT_Z_CLIP_ABS: float | None = 6.0
+
 # v14: bidirectional 전역 기본 임계값 (단위: σ). yaml 미설정 시 fallback.
 DEFAULT_BIDIRECTIONAL_THRESHOLD: float = 1.0
 
@@ -64,7 +79,7 @@ class ComponentRef:
           us_rate: { source: fred, series_id: "DFF" }
     """
     name: str                          # 컴포넌트 이름 (예: 'kr_rate', 'us_rate')
-    source: str                        # 'fred' | 'ecos' | 'yfinance' | 'krx'
+    source: str                        # 'fred' | 'ecos' | 'yfinance' | 'computed' | legacy 'krx'
     series_id: str | None = None       # FRED/yfinance/KRX 시리즈
     stat_code: str | None = None       # ECOS 통계표 코드
     item_code: str | None = None       # ECOS 통계항목 코드 (있을 수도 없을 수도)
@@ -80,7 +95,7 @@ class Variable:
         code            : 내부 식별자 (예: 'VIX')
         name_kr         : 한국어 표시명
         name_en         : 영어 표시명
-        source          : 'fred' | 'yfinance' | 'ecos' | 'krx' | 'pykrx' | 'computed'
+        source          : 'fred' | 'yfinance' | 'ecos' | 'computed' | legacy 'krx' | 'pykrx'
         series_id       : 출처별 시리즈 코드 (computed면 None)
         channel         : 1~5 (target/auxiliary는 None)
         risk_direction  : 'positive' | 'negative' (target/auxiliary는 None)
@@ -372,6 +387,64 @@ def load_composite_method(yaml_path: Path | str | None = None) -> str:
             f"허용: {sorted(VALID_COMPOSITE_METHODS)}"
         )
     return method
+
+
+def load_standardization_method(yaml_path: Path | str | None = None) -> str:
+    """(v18) thresholds.standardization_method 반환. 없으면 robust.
+
+    Raises:
+        ValueError: VALID_STANDARDIZATION_METHODS 외의 값이 설정되어 있으면 발생.
+    """
+    cfg = _read_yaml(yaml_path)
+    raw = (cfg.get("thresholds") or {}).get("standardization_method")
+    if raw is None:
+        return DEFAULT_STANDARDIZATION_METHOD
+    method = str(raw).strip()
+    if method not in VALID_STANDARDIZATION_METHODS:
+        raise ValueError(
+            f"지원하지 않는 standardization_method 값: {method!r}. "
+            f"허용: {sorted(VALID_STANDARDIZATION_METHODS)}"
+        )
+    return method
+
+
+def load_percentile_method(yaml_path: Path | str | None = None) -> str:
+    """(v18) thresholds.percentile_method 반환. 없으면 empirical.
+
+    Raises:
+        ValueError: VALID_PERCENTILE_METHODS 외의 값이 설정되어 있으면 발생.
+    """
+    cfg = _read_yaml(yaml_path)
+    raw = (cfg.get("thresholds") or {}).get("percentile_method")
+    if raw is None:
+        return DEFAULT_PERCENTILE_METHOD
+    method = str(raw).strip()
+    if method not in VALID_PERCENTILE_METHODS:
+        raise ValueError(
+            f"지원하지 않는 percentile_method 값: {method!r}. "
+            f"허용: {sorted(VALID_PERCENTILE_METHODS)}"
+        )
+    return method
+
+
+def load_z_clip_abs(yaml_path: Path | str | None = None) -> float | None:
+    """(v18) thresholds.z_clip_abs 반환.
+
+    None/null이면 클리핑을 비활성화한다. 음수 또는 파싱 불가 값은 기본값을 사용한다.
+    """
+    cfg = _read_yaml(yaml_path)
+    raw = (cfg.get("thresholds") or {}).get("z_clip_abs")
+    if raw is None:
+        return DEFAULT_Z_CLIP_ABS
+    if isinstance(raw, str) and raw.strip().lower() in {"none", "null", "false", "off"}:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_Z_CLIP_ABS
+    if val <= 0:
+        return DEFAULT_Z_CLIP_ABS
+    return val
 
 
 # =============================================================================

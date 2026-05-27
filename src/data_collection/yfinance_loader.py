@@ -5,6 +5,8 @@ yfinance 라이브러리로 시장 가격 시계열을 수집합니다.
     ^BDIY      : Baltic Dry Index (1차 시도, 안 되면 BDRY ETF로 폴백)
     BDRY       : Baltic Dry Index ETF (폴백)
     DX-Y.NYB   : 달러 인덱스 (DXY)
+    ^KS11      : KOSPI Composite
+    ^KQ11      : KOSDAQ Composite
     ^MOVE      : 미국채 변동성 (1차 비활성)
 
 [한계]

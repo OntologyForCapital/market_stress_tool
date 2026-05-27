@@ -21,6 +21,8 @@ import pytest
 
 from src.preprocessing.alignment import align_series, drop_long_gap_periods
 from src.preprocessing.standardize import (
+    rolling_percentile_rank,
+    rolling_robust_zscore,
     rolling_zscore,
     standardize_panel,
     load_risk_directions_from_yaml,
@@ -185,6 +187,37 @@ class TestStandardize:
         z = rolling_zscore(s)
         assert z.empty
 
+    def test_robust_zscore_less_distorted_by_outlier(self):
+        """[Unit] robust z-score는 단발성 극단치 이후의 기준선 오염이 작다."""
+        n = TRADING_DAYS_PER_YEAR * 6
+        idx = pd.bdate_range("2018-01-01", periods=n)
+        vals = np.zeros(n)
+        vals[TRADING_DAYS_PER_YEAR * 5] = 100.0
+        vals[TRADING_DAYS_PER_YEAR * 5 + 5] = 1.0
+        s = pd.Series(vals, index=idx, name="X")
+
+        classic = rolling_zscore(s, window_years=5, min_periods_ratio=0.5)
+        robust = rolling_robust_zscore(s, window_years=5, min_periods_ratio=0.5)
+
+        probe_idx = idx[TRADING_DAYS_PER_YEAR * 5 + 5]
+        assert abs(robust.loc[probe_idx]) > abs(classic.loc[probe_idx])
+
+    def test_empirical_percentile_rank_midrank(self):
+        """[Unit] rolling empirical percentile는 선형 z 환산이 아니라 분포 내 순위."""
+        n = TRADING_DAYS_PER_YEAR * 3
+        idx = pd.bdate_range("2020-01-01", periods=n)
+        s = pd.Series(np.arange(n, dtype=float), index=idx, name="X")
+        pct = rolling_percentile_rank(s, window_years=1, min_periods_ratio=0.5)
+        assert pct.dropna().iloc[-1] > 99.0
+
+    def test_empirical_percentile_rank_flat_window_is_midrank(self):
+        """[Unit] 값이 모두 같은 윈도우는 경험분포 midrank인 50."""
+        n = TRADING_DAYS_PER_YEAR * 2
+        idx = pd.bdate_range("2020-01-01", periods=n)
+        s = pd.Series(np.zeros(n), index=idx, name="X")
+        pct = rolling_percentile_rank(s, window_years=1, min_periods_ratio=0.5)
+        assert pct.dropna().iloc[-1] == 50.0
+
     def test_zscore_insufficient_window_is_nan(self):
         """[Unit] 윈도우가 채워지지 않은 초기 구간은 NaN."""
         rng = np.random.default_rng(7)
@@ -235,8 +268,8 @@ class TestStandardize:
         # 활성 변수는 포함되어야 함
         assert "VIX" in directions
         assert directions["VIX"] == "positive"
-        assert "ISM_PMI" in directions
-        assert directions["ISM_PMI"] == "negative"
+        assert "INDPRO" in directions
+        assert directions["INDPRO"] == "negative"
         assert "KRW_USD" in directions
         assert directions["KRW_USD"] == "positive"
 

@@ -4,6 +4,8 @@ sys.path.insert(0, "src")
 import pandas as pd
 from pipeline import run_full_diagnosis
 
+TODAY = pd.Timestamp.today().normalize()
+
 target_dates = [
     ("2015-08-24", "China shock"),
     ("2018-10-29", "미중 무역전쟁"),
@@ -22,7 +24,8 @@ var_z_records = []  # 변수별 z-score long format
 for date_str, label in target_dates:
     as_of = pd.Timestamp(date_str)
     start = (as_of - pd.DateOffset(years=7)).strftime("%Y-%m-%d")
-    end = (as_of + pd.DateOffset(days=200)).strftime("%Y-%m-%d")
+    end_ts = min(as_of + pd.DateOffset(days=200), TODAY)
+    end = end_ts.strftime("%Y-%m-%d")
 
     print(f"\n=== {date_str} ({label}) ===")
     try:
@@ -72,6 +75,13 @@ for date_str, label in target_dates:
         import traceback
         traceback.print_exc()
         results.append({"date": date_str, "label": label, "error": str(e)})
+
+if any(row.get("error") for row in results):
+    df_error = pd.DataFrame(results)
+    print("\n\n=== 오류가 있어 CSV 저장을 건너뜁니다 ===")
+    print(df_error.to_string())
+    print("네트워크/API 키/캐시를 보강한 뒤 다시 실행하세요.")
+    sys.exit(1)
 
 # 채널 점수 CSV
 df = pd.DataFrame(results)

@@ -8,17 +8,16 @@ UI에서 바로 사용할 수 있는 `DiagnosisResult` 객체를 반환합니다
     1) config.load_variables() / load_target_variables() / 기타 매핑 로드
     2) dispatcher.fetch_all_variables() — variables + target_variables 통합 수집
     3) preprocessing.align_series() — 영업일 그리드 정합
-    4) preprocessing.standardize_panel() — 롤링 z-score (target 제외)
+    4) preprocessing.standardize_panel() — 롤링 robust z-score (target 제외)
     5) analysis.build_stress_index_table() — S1~S5 + composite
     6) analysis.classify_history() — 일자별 패턴 분류
     7) analysis.find_similar_with_forward_returns() — KOSPI 기준 유사 시점 + forward returns
     8) analysis.track_origin() — 진원지 변수/채널 추적
     9) DiagnosisResult 조립
 
-KRX 약관 안내:
-    이 파이프라인이 산출한 결과를 UI/리포트에 노출할 때는
-    반드시 "데이터 출처: 한국거래소 통계정보" 표기를 포함해야 합니다.
-    (`src.data_collection.krx_loader.DATA_SOURCE_NOTICE_KR` 참고)
+데이터 출처 안내:
+    KOSPI/KOSDAQ 타겟은 v20부터 KRX API가 아니라 Yahoo Finance
+    (^KS11, ^KQ11)를 사용합니다.
 
 [한계 및 주의]
     - 변수 수집 실패는 silent하게 격리되어 `failed_variables`에 기록됨
@@ -44,20 +43,28 @@ from src.analysis.pattern_diagnosis import (
     classify_history,
 )
 from src.analysis.stress_index import build_stress_index_table
+from src.analysis.threshold_calibration import build_threshold_calibration
 from src.config import (
     Variable,
     load_channel_mapping,
     load_channel_weights,
     load_bidirectional_thresholds,
     load_composite_method,
+    load_percentile_method,
     load_risk_directions,
+    load_standardization_method,
     load_target_variables,
     load_transform_map,
     load_variables,
+    load_z_clip_abs,
 )
 from src.data_collection.dispatcher import fetch_all_variables
 from src.preprocessing.alignment import align_series
-from src.preprocessing.standardize import apply_transforms_panel, standardize_panel
+from src.preprocessing.standardize import (
+    apply_transforms_panel,
+    rolling_percentile_rank,
+    standardize_panel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +79,7 @@ class DiagnosisResult:
     Fields (verbatim spec):
         as_of_date            : 진단 기준일 (None이면 데이터의 마지막 영업일 자동 사용)
         composite_score       : 현재 종합 스트레스 지수 (z-score)
-        composite_percentile  : 0~100 백분위 변환값
+        composite_percentile  : 0~100 백분위 변환값 (기본: rolling empirical)
         pattern_label         : 현재 패턴 분류 (예: 'normal', 'rate_shock', ...)
         channel_scores        : 현재 채널별 z-score {1: S1, 2: S2, ..., 5: S5}
         channel_percentiles   : 0~100 백분위 변환값 {1: pct, ..., 5: pct}
@@ -85,8 +92,19 @@ class DiagnosisResult:
         data_period           : (실제 데이터 시작일, 끝일)
         composite_pct_series  : 종합 스트레스 백분위 시계열 (UI 시계열 차트용)
         channel_pct_panel     : 채널별 백분위 시계열 DataFrame (S1~S5 컬럼)
+        raw_panel             : 수집 직후 원자료 시계열 DataFrame (정합/변환 전)
         aligned_panel         : 정합된 raw 값 시계열 DataFrame (변수별 원본값, 세부 내용 탭용)
         z_panel               : 변수별 z-score 시계열 DataFrame (세부 내용 탭용)
+        stress_table          : 채널/종합 z-score 시계열 DataFrame
+        variable_pct_panel    : 변수별 백분위 시계열 DataFrame
+        standardization_method: 표준화 방식 ('robust' | 'classic')
+        percentile_method     : 백분위 방식 ('empirical' | 'linear')
+        z_clip_abs            : z-score 절대값 clip 한도
+        calibration_summary   : 이벤트/변동성 regime 기반 임계값 보정 요약
+        calibration_event_metrics: 이벤트 라벨 기준 threshold 성능표
+        calibration_regime_thresholds: volatility regime별 경험적 분위수
+        calibration_event_labels: 이벤트 윈도우 라벨 시계열
+        calibration_regime_series: 날짜별 volatility regime 시계열
     """
 
     as_of_date: pd.Timestamp
@@ -104,15 +122,26 @@ class DiagnosisResult:
     data_period: tuple[pd.Timestamp | None, pd.Timestamp | None] = (None, None)
     composite_pct_series: pd.Series = field(default_factory=lambda: pd.Series(dtype="float64"))
     channel_pct_panel: pd.DataFrame = field(default_factory=pd.DataFrame)
+    raw_panel: pd.DataFrame = field(default_factory=pd.DataFrame)
     aligned_panel: pd.DataFrame = field(default_factory=pd.DataFrame)
     z_panel: pd.DataFrame = field(default_factory=pd.DataFrame)
+    stress_table: pd.DataFrame = field(default_factory=pd.DataFrame)
+    variable_pct_panel: pd.DataFrame = field(default_factory=pd.DataFrame)
+    standardization_method: str = "robust"
+    percentile_method: str = "empirical"
+    z_clip_abs: float | None = None
+    calibration_summary: dict[str, object] = field(default_factory=dict)
+    calibration_event_metrics: pd.DataFrame = field(default_factory=pd.DataFrame)
+    calibration_regime_thresholds: pd.DataFrame = field(default_factory=pd.DataFrame)
+    calibration_event_labels: pd.Series = field(default_factory=lambda: pd.Series(dtype="bool"))
+    calibration_regime_series: pd.Series = field(default_factory=lambda: pd.Series(dtype="object"))
 
 
 # =============================================================================
 # 백분위 변환 헬퍼
 # =============================================================================
 def z_to_percentile(z: float) -> float:
-    """z-score를 0~100 백분위로 선형 변환 (UI 표시용 근사값).
+    """z-score를 0~100 백분위로 선형 변환 (레거시 fallback).
 
     매핑:
         z = -2.5 → 0
@@ -121,8 +150,8 @@ def z_to_percentile(z: float) -> float:
         그 밖은 [0, 100]으로 clip.
 
     이 변환은 정규분포 가정 하의 정확한 CDF가 아니라 UI 시각화를 위한
-    선형 근사입니다. 통계적 백분위가 필요하면 scipy.stats.norm.cdf(z)*100
-    을 직접 사용하세요.
+    선형 근사입니다. v18 이후 파이프라인 기본값은 rolling empirical
+    percentile rank이며, 이 함수는 테스트/폴백 호환성을 위해 유지합니다.
 
     NaN 입력은 NaN 그대로 반환.
     """
@@ -198,6 +227,37 @@ def _summarize_forward_returns(
     return summary
 
 
+def _percentile_series(
+    series: pd.Series,
+    method: str,
+    window_years: int = 5,
+    min_periods_ratio: float = 0.5,
+) -> pd.Series:
+    """시계열을 UI용 0~100 점수로 변환."""
+    if method == "empirical":
+        return rolling_percentile_rank(
+            series,
+            window_years=window_years,
+            min_periods_ratio=min_periods_ratio,
+        )
+    return series.apply(z_to_percentile)
+
+
+def _lookup_percentile(
+    pct_series: pd.Series,
+    ts: pd.Timestamp,
+    fallback_value: float,
+) -> float:
+    """percentile 시계열에서 ts 값을 안전 조회하고 없으면 선형 fallback."""
+    if pct_series.empty:
+        return z_to_percentile(fallback_value)
+    row = _safe_series_row(pct_series.to_frame("pct"), ts)
+    pct = row.get("pct", float("nan")) if not row.empty else float("nan")
+    if pd.notna(pct):
+        return float(pct)
+    return z_to_percentile(fallback_value)
+
+
 # =============================================================================
 # 메인 진단 파이프라인
 # =============================================================================
@@ -259,6 +319,10 @@ def run_full_diagnosis(
     bidirectional_thresholds: dict[str, float] = load_bidirectional_thresholds(yaml_path)
     # v15: 종합점수 집계 방식 ("mean" | "l2_norm", 기본 l2_norm)
     composite_method: str = load_composite_method(yaml_path)
+    # v18: fat-tail을 고려한 robust 표준화 + 경험적 백분위.
+    standardization_method: str = load_standardization_method(yaml_path)
+    percentile_method: str = load_percentile_method(yaml_path)
+    z_clip_abs: float | None = load_z_clip_abs(yaml_path)
 
     # 활성화 변수 코드 (channel 매핑이 있는 변수 = standardize/지수 계산 대상)
     target_codes = {v.code for v in target_vars}
@@ -300,6 +364,12 @@ def run_full_diagnosis(
             "수집된 변수가 0개입니다. variables.yaml 또는 네트워크/API 키를 확인하세요."
         )
 
+    # 수집 직후 원자료 패널. 영업일 정합/forward-fill/변환 전 상태를 UI에서 확인하기 위함.
+    raw_panel = pd.concat(
+        [s.rename(code) for code, s in series_dict.items()],
+        axis=1,
+    ).sort_index()
+
     # -----------------------------------------------------------------
     # 3) 정합 (영업일 그리드)
     # -----------------------------------------------------------------
@@ -337,10 +407,13 @@ def run_full_diagnosis(
         panel_for_z,
         risk_directions=risk_directions,
         bidirectional_thresholds=bidirectional_thresholds,
+        method=standardization_method,
+        clip_abs=z_clip_abs,
     )
     logger.info(
-        "standardize 완료: z_panel shape=%s, bidirectional 변수=%s",
-        z_panel.shape, sorted(bidirectional_thresholds.keys()),
+        "standardize 완료: z_panel shape=%s, method=%s, clip_abs=%s, bidirectional 변수=%s",
+        z_panel.shape, standardization_method, z_clip_abs,
+        sorted(bidirectional_thresholds.keys()),
     )
 
     # -----------------------------------------------------------------
@@ -359,12 +432,24 @@ def run_full_diagnosis(
         list(stress_table.columns), composite_method,
     )
 
-    # 종합 백분위 시계열 (UI 시계열 차트용)
-    composite_pct_series = stress_table["composite"].apply(z_to_percentile)
+    # 종합 백분위 시계열 (UI 시계열 차트용).
+    # v18: 기본값은 정규분포 선형 근사가 아니라 과거 rolling 분포 내 empirical rank.
+    composite_pct_series = _percentile_series(
+        stress_table["composite"], method=percentile_method,
+    )
     composite_pct_series.name = "composite_pct"
 
     # 채널 백분위 시계열 (클릭 시 분해 차트용)
-    channel_pct_panel = stress_table[["S1", "S2", "S3", "S4", "S5"]].applymap(z_to_percentile)
+    channel_pct_panel = stress_table[["S1", "S2", "S3", "S4", "S5"]].apply(
+        lambda col: _percentile_series(col, method=percentile_method),
+        axis=0,
+    )
+
+    # 변수별 백분위 시계열 (현재값 조회용)
+    variable_pct_panel = z_panel.apply(
+        lambda col: _percentile_series(col, method=percentile_method),
+        axis=0,
+    )
 
     # -----------------------------------------------------------------
     # 6) 패턴 분류 (전체 히스토리)
@@ -389,11 +474,14 @@ def run_full_diagnosis(
         else:
             v = float("nan")
         channel_scores[ch] = v
-        channel_percentiles[ch] = z_to_percentile(v)
+        pct_col = channel_pct_panel[col] if col in channel_pct_panel.columns else pd.Series(dtype="float64")
+        channel_percentiles[ch] = _lookup_percentile(pct_col, as_of_ts, v)
 
     composite_raw = stress_row.get("composite", float("nan")) if not stress_row.empty else float("nan")
     composite_score = float(composite_raw) if pd.notna(composite_raw) else float("nan")
-    composite_percentile = z_to_percentile(composite_score)
+    composite_percentile = _lookup_percentile(
+        composite_pct_series, as_of_ts, composite_score,
+    )
 
     # 7-b) 변수별 z-score / 백분위
     z_row = _safe_series_row(z_panel, as_of_ts)
@@ -405,7 +493,8 @@ def run_full_diagnosis(
         else:
             zv = float("nan")
         variable_z_scores[code] = zv
-        variable_percentiles[code] = z_to_percentile(zv)
+        pct_col = variable_pct_panel[code] if code in variable_pct_panel.columns else pd.Series(dtype="float64")
+        variable_percentiles[code] = _lookup_percentile(pct_col, as_of_ts, zv)
 
     # 7-c) 현재 패턴 (classify_at으로 직접 계산 - history에 의존하지 않음)
     s1 = channel_scores.get(1, float("nan"))
@@ -432,6 +521,16 @@ def run_full_diagnosis(
     logger.info(
         "현재 진단: pattern=%s, composite=%.3f (pct=%.1f)",
         pattern_label, composite_score, composite_percentile,
+    )
+
+    # -----------------------------------------------------------------
+    # 7-d) 이벤트/변동성 regime 기반 임계값 보정
+    # -----------------------------------------------------------------
+    kospi_series = aligned.get("KOSPI") if "KOSPI" in aligned.columns else None
+    calibration = build_threshold_calibration(
+        stress_table,
+        price_series=kospi_series,
+        as_of=as_of_ts,
     )
 
     # -----------------------------------------------------------------
@@ -508,8 +607,19 @@ def run_full_diagnosis(
         data_period=data_period,
         composite_pct_series=composite_pct_series,
         channel_pct_panel=channel_pct_panel,
+        raw_panel=raw_panel,
         aligned_panel=aligned,
         z_panel=z_panel,
+        stress_table=stress_table,
+        variable_pct_panel=variable_pct_panel,
+        standardization_method=standardization_method,
+        percentile_method=percentile_method,
+        z_clip_abs=z_clip_abs,
+        calibration_summary=calibration.summary,
+        calibration_event_metrics=calibration.event_metrics,
+        calibration_regime_thresholds=calibration.regime_thresholds,
+        calibration_event_labels=calibration.event_label_series,
+        calibration_regime_series=calibration.regime_series,
     )
     logger.info("run_full_diagnosis 완료.")
     return result

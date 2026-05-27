@@ -216,6 +216,9 @@ UI_TEXTS: dict[str, str] = {
     "tab_main": "메인 진단",
     "tab_explain": "설명",
     "tab_history": "과거 데이터 조회",
+    "tab_history_detail": "과거 세부 내용",
+    "tab_raw_timeseries": "원자료 시계열",
+    "tab_calibration": "통계 검증",
 
     "header_title": "",
     "asset_formula": "P = E[CF실질] / (r실질 + π위험)",
@@ -244,7 +247,7 @@ UI_TEXTS: dict[str, str] = {
     "similar_card_empty": "유사 시점을 찾지 못했습니다 (데이터 부족).",
     "similar_card_more": "→ 자세히 보기",
 
-    "footer_sources": "데이터 출처: FRED · 한국거래소 통계정보 · Yahoo Finance · 한국은행 ECOS",
+    "footer_sources": "데이터 출처: FRED · Yahoo Finance · 한국은행 ECOS",
     "footer_disclaimer": "이 도구는 분석 보조용이며 투자 권유가 아닙니다.",
 
     "history_title": "임의 날짜 진단 조회",
@@ -279,8 +282,8 @@ UI_TEXTS: dict[str, str] = {
     "details_field_channel": "소속 채널",
     "details_field_risk_direction": "위험 방향",
     "details_field_transform": "사전 변환",
-    "details_field_current_raw": "현재 값 (raw)",
-    "details_field_current_z": "현재 z-score (5년 롤링)",
+    "details_field_current_raw": "기준일 값 (raw)",
+    "details_field_current_z": "기준일 z-score (5년 롤링)",
     "details_field_current_pct": "백분위 (0~100)",
     "details_field_contribution": "채널 점수 기여도",
     "details_field_timeseries": "최근 1년 시계열",
@@ -290,6 +293,11 @@ UI_TEXTS: dict[str, str] = {
 
     # 과거 조회 간소 헤더
     "history_summary_fmt": "종합 점수: {pct:.0f}점 ({level_kr})",
+
+    # 과거 세부 내용 / 통계 검증 탭
+    "history_detail_title": "과거 세부 내용",
+    "raw_timeseries_title": "처리되지 않은 원자료 시계열",
+    "calibration_title": "통계 검증 및 임계값 보정",
 }
 
 

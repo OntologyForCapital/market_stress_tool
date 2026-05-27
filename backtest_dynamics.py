@@ -85,6 +85,9 @@ WIN_AFTER = 120
 # peak 탐색 윈도우 (T 주변).
 PEAK_WIN = 30
 
+# 실행일 이후 데이터는 존재하지 않으므로 KRX 미래 빈 캐시 생성을 방지한다.
+TODAY = pd.Timestamp.today().normalize()
+
 # 그래프 자원 — 한국어 깨짐 방지: 영문 라벨 + 한글 fallback 시도.
 plt.rcParams["axes.unicode_minus"] = False
 for font_name in ("AppleGothic", "Malgun Gothic", "NanumGothic", "DejaVu Sans"):
@@ -193,7 +196,8 @@ def collect_windows() -> list[WindowResult]:
         t0 = pd.Timestamp(date_str)
         # 5년 롤링 표준화 + 워밍아웃 + T+120일 여유를 위해 넉넉히 8년.
         start = (t0 - pd.DateOffset(years=8)).strftime("%Y-%m-%d")
-        end = (t0 + pd.DateOffset(days=WIN_AFTER + 80)).strftime("%Y-%m-%d")
+        end_ts = min(t0 + pd.DateOffset(days=WIN_AFTER + 80), TODAY)
+        end = end_ts.strftime("%Y-%m-%d")
 
         print(f"\n=== {date_str} ({label}) ===")
         try:
@@ -440,6 +444,12 @@ def main() -> None:
     windows = collect_windows()
     if not windows:
         print("어떤 시점도 추출 못 함. 실패.")
+        sys.exit(1)
+    if len(windows) != len(TARGET_DATES):
+        print(
+            f"{len(TARGET_DATES)}개 중 {len(windows)}개만 추출되어 "
+            "부분 산출물 저장을 건너뜁니다."
+        )
         sys.exit(1)
     write_csvs(windows)
     write_plots(windows)

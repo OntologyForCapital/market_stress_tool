@@ -24,6 +24,9 @@ from src.ui.labels import (
 )
 
 
+EVENT_LABEL_Y_POSITIONS: tuple[float, ...] = (-0.14, -0.28, -0.42)
+
+
 # =============================================================================
 # 1) 채널별 가로 막대 (메인 좌측)
 # =============================================================================
@@ -206,6 +209,7 @@ def make_composite_timeseries(
     title: str | None = None,
     height: int = 360,
     show_threshold_lines: bool = True,
+    event_annotations: Iterable[tuple[pd.Timestamp | str, str]] | None = None,
 ) -> go.Figure:
     """종합 스트레스 백분위 시계열.
 
@@ -214,6 +218,7 @@ def make_composite_timeseries(
         title: 차트 제목.
         height: 차트 높이.
         show_threshold_lines: True면 33/67 가로 점선 표시.
+        event_annotations: (날짜, 라벨) 쌍. 조회 기간 안의 사건만 표시.
 
     Returns:
         plotly Figure.
@@ -231,6 +236,16 @@ def make_composite_timeseries(
         )
     )
 
+    visible_events: list[tuple[pd.Timestamp, str]] = []
+    if event_annotations is not None and not s.empty:
+        start = pd.Timestamp(s.index.min())
+        end = pd.Timestamp(s.index.max())
+        for event_date, label in event_annotations:
+            ts = pd.Timestamp(event_date)
+            if start <= ts <= end:
+                visible_events.append((ts, str(label)))
+        visible_events.sort(key=lambda item: item[0])
+
     if show_threshold_lines:
         fig.add_hline(
             y=33, line_width=1, line_dash="dot",
@@ -247,10 +262,45 @@ def make_composite_timeseries(
             annotation_font_size=10,
         )
 
+    label_lane_count = min(len(visible_events), len(EVENT_LABEL_Y_POSITIONS))
+    for event_idx, (event_date, label) in enumerate(visible_events):
+        label_y = EVENT_LABEL_Y_POSITIONS[event_idx % label_lane_count]
+        fig.add_shape(
+            type="line",
+            xref="x",
+            yref="paper",
+            x0=event_date,
+            x1=event_date,
+            y0=0,
+            y1=1,
+            line=dict(color="rgba(80,80,80,0.45)", width=1, dash="dot"),
+        )
+        fig.add_annotation(
+            x=event_date,
+            y=label_y,
+            xref="x",
+            yref="paper",
+            text=_wrap_event_label(label),
+            showarrow=False,
+            xanchor="center",
+            yanchor="top",
+            align="center",
+            font=dict(size=10, color="#444444"),
+            bgcolor="rgba(255,255,255,0.88)",
+            bordercolor="rgba(0,0,0,0.12)",
+            borderwidth=1,
+            borderpad=3,
+        )
+
     fig.update_layout(
         title=title if title else "",
         height=height,
-        margin=dict(l=10, r=10, t=50, b=40),
+        margin=dict(
+            l=10,
+            r=10,
+            t=50,
+            b=_event_label_bottom_margin(label_lane_count),
+        ),
         plot_bgcolor="white",
         xaxis=dict(title="", gridcolor="rgba(0,0,0,0.08)"),
         yaxis=dict(
@@ -263,6 +313,22 @@ def make_composite_timeseries(
         showlegend=False,
     )
     return fig
+
+
+def _event_label_bottom_margin(label_lane_count: int) -> int:
+    """사건 라벨 줄 수에 맞춰 하단 여백을 반환."""
+    if label_lane_count <= 0:
+        return 40
+    return 90 + label_lane_count * 38
+
+
+def _wrap_event_label(label: str) -> str:
+    """긴 사건 라벨을 차트 하단에 들어가도록 가볍게 줄바꿈."""
+    return (
+        label.replace(" + ", "<br>+ ")
+        .replace("/", "/<br>")
+        .replace("·", "·<br>")
+    )
 
 
 # =============================================================================

@@ -5,7 +5,7 @@
     2. 출처 (FRED/KRX/ECOS/yfinance) + series_id
     3. 채널 (1~5) + 채널 한국어 이름
     4. 위험 방향 (positive/negative) + 설명
-    5. 현재 raw 값
+    5. 기준일 raw 값
     6. 5년 롤링 z-score
     7. 백분위 (0~100)
     8. 채널 점수 기여도
@@ -33,6 +33,19 @@ from src.ui.labels import (
     SOURCE_LABELS_KR,
     UI_TEXTS,
 )
+
+
+def _last_valid_on_or_before(
+    series: pd.Series,
+    as_of: pd.Timestamp,
+) -> tuple[float, pd.Timestamp | None]:
+    """Return the last valid value on or before as_of."""
+    if series.empty:
+        return float("nan"), None
+    prior = series.loc[:as_of].dropna()
+    if prior.empty:
+        return float("nan"), None
+    return float(prior.iloc[-1]), prior.index[-1]
 
 
 def _mini_timeseries(
@@ -86,7 +99,13 @@ def _color_chip(pct: float) -> str:
     )
 
 
-def render_details_tab(result: DiagnosisResult, variables_meta: dict[str, dict]) -> None:
+def render_details_tab(
+    result: DiagnosisResult,
+    variables_meta: dict[str, dict],
+    title: str | None = None,
+    intro: str | None = None,
+    key_prefix: str = "details",
+) -> None:
     """세부 내용 탭 렌더.
 
     Args:
@@ -94,8 +113,8 @@ def render_details_tab(result: DiagnosisResult, variables_meta: dict[str, dict])
                 `variable_percentiles`, `channel_scores` 필드 사용.
         variables_meta: {code: {name_kr, channel, risk_direction, source, ...}}.
     """
-    st.markdown(f"### {UI_TEXTS['details_title']}")
-    st.markdown(UI_TEXTS["details_intro"])
+    st.markdown(f"### {title or UI_TEXTS['details_title']}")
+    st.markdown(intro or UI_TEXTS["details_intro"])
 
     aligned_panel = result.aligned_panel
     z_panel = result.z_panel
@@ -146,6 +165,7 @@ def render_details_tab(result: DiagnosisResult, variables_meta: dict[str, dict])
                     z_panel=z_panel,
                     one_year_ago=one_year_ago,
                     variable_to_channel=variable_to_channel,
+                    key_prefix=key_prefix,
                 )
 
     # 채널 외 변수 (예: KOSPI 같은 타깃)
@@ -160,6 +180,7 @@ def render_details_tab(result: DiagnosisResult, variables_meta: dict[str, dict])
                     z_panel=z_panel,
                     one_year_ago=one_year_ago,
                     variable_to_channel=variable_to_channel,
+                    key_prefix=key_prefix,
                 )
 
 
@@ -171,6 +192,7 @@ def _render_variable_block(
     z_panel: pd.DataFrame | None,
     one_year_ago: pd.Timestamp,
     variable_to_channel: dict[str, int],
+    key_prefix: str,
 ) -> None:
     """변수 한 개의 상세 블록 렌더."""
     # 메타 정보
@@ -215,24 +237,23 @@ def _render_variable_block(
     # variable_z_scores에 NaN이 들어갈 수 있다. z_panel의 마지막 유효값으로 보관.
     z_is_stale = False
     last_valid_z_date: pd.Timestamp | None = None
+    as_of = result.as_of_date
     if math.isnan(z_val) and z_panel is not None and not z_panel.empty and code in z_panel.columns:
-        z_series = z_panel[code].dropna()
-        if not z_series.empty:
-            z_val = float(z_series.iloc[-1])
-            last_valid_z_date = z_series.index[-1]
+        z_val, last_valid_z_date = _last_valid_on_or_before(z_panel[code], as_of)
+        if last_valid_z_date is not None:
             z_is_stale = True
-            # 백분위도 재산출
             if math.isnan(pct_val):
-                pct_val = float(z_to_percentile(z_val))
+                pct_panel = getattr(result, "variable_pct_panel", None)
+                if pct_panel is not None and not pct_panel.empty and code in pct_panel.columns:
+                    pct_val, _ = _last_valid_on_or_before(pct_panel[code], as_of)
+                if math.isnan(pct_val):
+                    pct_val = float(z_to_percentile(z_val))
 
-    # raw 값: aligned_panel 마지막 행
+    # raw 값: 기준일 이하 마지막 유효 정합값
     raw_val = float("nan")
     last_valid_raw_date: pd.Timestamp | None = None
     if aligned_panel is not None and not aligned_panel.empty and code in aligned_panel.columns:
-        raw_series = aligned_panel[code].dropna()
-        if not raw_series.empty:
-            raw_val = float(raw_series.iloc[-1])
-            last_valid_raw_date = raw_series.index[-1]
+        raw_val, last_valid_raw_date = _last_valid_on_or_before(aligned_panel[code], as_of)
 
     # 채널 점수 기여도: 채널 내 변수 개수로 균등 가중 + 위험방향 부호
     # 작업 3 (v12): z_val이 stale이더라도 의미있는 수치면 기여도 계산.
@@ -284,12 +305,14 @@ def _render_variable_block(
             f"마지막 유효 발표일: {last_valid_z_date.strftime('%Y-%m-%d')} 기준값을 표시했습니다."
         )
     elif math.isnan(z_val):
-        st.caption("현재 z-score 산출 불가 (해당 변수의 유효 시계열이 부족합니다).")
+        st.caption("기준일 z-score 산출 불가 (해당 변수의 유효 시계열이 부족합니다).")
+    if last_valid_raw_date is not None and last_valid_raw_date < as_of:
+        st.caption(f"raw 값은 {last_valid_raw_date.strftime('%Y-%m-%d')} 발표/관측값입니다.")
 
     # 시계열 (최근 1년)
     if z_panel is not None and not z_panel.empty and code in z_panel.columns:
         ts = z_panel[code]
-        ts_view = ts[ts.index >= one_year_ago].dropna()
+        ts_view = ts[(ts.index >= one_year_ago) & (ts.index <= result.as_of_date)].dropna()
         if not ts_view.empty:
             st.markdown(f"**{UI_TEXTS['details_field_timeseries']}** (z-score, 점선: ±1.5σ)")
             fig = _mini_timeseries(ts_view, height=180, is_zscore=True)
@@ -297,13 +320,13 @@ def _render_variable_block(
                 fig,
                 use_container_width=True,
                 config={"displayModeBar": False},
-                key=f"details_ts_{code}",
+                key=f"{key_prefix}_ts_{code}",
             )
         else:
             st.caption("최근 1년 z-score 시계열 데이터 없음.")
     elif aligned_panel is not None and not aligned_panel.empty and code in aligned_panel.columns:
         ts = aligned_panel[code]
-        ts_view = ts[ts.index >= one_year_ago].dropna()
+        ts_view = ts[(ts.index >= one_year_ago) & (ts.index <= result.as_of_date)].dropna()
         if not ts_view.empty:
             st.markdown(f"**{UI_TEXTS['details_field_timeseries']}** (raw)")
             fig = _mini_timeseries(ts_view, height=180, is_zscore=False)
@@ -311,7 +334,7 @@ def _render_variable_block(
                 fig,
                 use_container_width=True,
                 config={"displayModeBar": False},
-                key=f"details_ts_{code}",
+                key=f"{key_prefix}_ts_{code}",
             )
 
     st.markdown("---")

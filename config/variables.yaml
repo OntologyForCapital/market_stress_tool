@@ -7,12 +7,13 @@
 #   code            : 내부 식별자 (코드에서 사용)
 #   name_kr         : 한국어 표시명 (UI/리포트용)
 #   name_en         : 영어 표시명
-#   source          : 데이터 출처 (fred | yfinance | ecos | pykrx | computed)
+#   source          : 데이터 출처 (fred | yfinance | ecos | computed)
 #   series_id       : 출처별 시리즈 코드
 #   channel         : 1~5 (5개 거시 채널)
-#   risk_direction  : positive | negative
+#   risk_direction  : positive | negative | bidirectional
 #                     - positive: 값이 클수록 위험 증가 → 표준화 결과 그대로 사용
 #                     - negative: 값이 클수록 위험 감소 → 표준화 후 부호 반전(-1 곱함)
+#                     - bidirectional: 양쪽 꼬리 모두 위험 → |z|가 임계값을 넘은 부분만 사용
 #   unit            : 단위 (해석 보조용)
 #   frequency       : daily | weekly | monthly (정렬 단계에서 fill 정책 결정)
 #   enabled         : true | false (1차 프로토타입에서 사용 여부)
@@ -308,18 +309,22 @@ target_variables:
   - code: KOSPI
     name_kr: "코스피 지수"
     name_en: "KOSPI Index"
-    source: krx
-    series_id: "코스피"           # krx 코스피 코드
+    source: yfinance
+    series_id: "^KS11"           # Yahoo Finance KOSPI Composite
     frequency: daily
-    notes: "k-NN 유사 시점 이후 성과 측정용 (30/90/180일 변화율)."
+    notes: |
+      k-NN 유사 시점 이후 성과 측정용 (30/90/180일 변화율).
+      v20: KRX Data Marketplace API 제약을 피하기 위해 yfinance ^KS11로 대체.
 
   - code: KOSDAQ
     name_kr: "코스닥 지수"
     name_en: "KOSDAQ Index"
-    source: krx
-    series_id: "코스닥"
+    source: yfinance
+    series_id: "^KQ11"           # Yahoo Finance KOSDAQ Composite
     frequency: daily
-    notes: "보조 타겟. 1차에서는 KOSPI 중심으로 분석."
+    notes: |
+      보조 타겟. 1차에서는 KOSPI 중심으로 분석.
+      v20: KRX Data Marketplace API 제약을 피하기 위해 yfinance ^KQ11로 대체.
 
 
 # -----------------------------------------------------------------------------
@@ -364,6 +369,9 @@ thresholds:
   ffill_limit_days: 30          # forward fill 최대 한도 (일)
   bidirectional_threshold_default: 1.0  # v14: bidirectional 변수의 전역 기본 임계값 (σ). 변수별 bidirectional_threshold로 override 가능.
   composite_method: l2_norm     # v15: 종합점수 산출 방식. "mean" (가중평균, 부호 보존) | "l2_norm" (RMS, 위험 강도). 기본 l2_norm.
+  standardization_method: robust # v18: "classic" 평균/표준편차 | "robust" median/MAD. fat-tail·이상치 영향 완화.
+  z_clip_abs: 6.0                # v18: 표준화 후 위험방향 적용 전 z-score 절댓값 상한. 단일 spike의 과도한 지수 지배 방지.
+  percentile_method: empirical   # v18: "linear" 50+20z | "empirical" rolling 분포 내 실제 percentile rank.
 
 
 # -----------------------------------------------------------------------------
